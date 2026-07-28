@@ -11,11 +11,12 @@ from reportlab.pdfgen import canvas
 from reportlab.lib import colors
 
 from flask import Flask
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     ConversationHandler,
     ContextTypes,
     filters,
@@ -33,6 +34,7 @@ CHANNEL_ID = os.environ.get("CHANNEL_ID")
 
 # Conversation States
 WAITING_FOR_TOPIC = 1
+WAITING_FOR_CUSTOM_TOPIC = 2
 
 # Database File
 DB_FILE = "study_data.db"
@@ -41,9 +43,10 @@ def init_db():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS screenshots (
+        CREATE TABLE IF NOT EXISTS content_store (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            file_id TEXT NOT NULL,
+            type TEXT NOT NULL,
+            content TEXT NOT NULL,
             topic TEXT NOT NULL,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
@@ -75,32 +78,52 @@ async def run_flask():
 # ----------------- Telegram Bot Handlers -----------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("📅 Daily PDF", callback_data="menu_daily"), InlineKeyboardButton("📊 Weekly PDF", callback_data="menu_weekly")],
+        [InlineKeyboardButton("📈 Monthly PDF", callback_data="menu_monthly"), InlineKeyboardButton("🏷️ Topic PDF", callback_data="menu_topic")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
     msg = (
-        "📚 *Bittu Study Notes Bot*\n\n"
-        "📸 **How to save notes:**\n"
-        "Send 1 or multiple screenshots, and reply with `#topic` when asked.\n\n"
-        "📄 **Get Compiled HD PDFs:**\n"
-        "• `/daily_pdf` - Today's notes\n"
-        "• `/weekly_pdf` - Last 7 days\n"
-        "• `/monthly_pdf` - Last 30 days\n"
-        "• `/topic_pdf #topic` - Filter by specific topic"
+        "📚 *Bittu Study Notes & Text Bot*\n\n"
+        "📸 **How to save notes/text:**\n"
+        "Send screenshots or text messages, and reply with `#topic`.\n\n"
+        "👇 *Or use the menu below to generate PDFs instantly:*"
     )
-    await update.message.reply_text(msg, parse_mode="Markdown")
+    if update.message:
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=reply_markup)
+    elif update.callback_query:
+        await update.callback_query.message.edit_text(msg, parse_mode="Markdown", reply_markup=reply_markup)
 
 async def receive_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo_file_id = update.message.photo[-1].file_id
+    if 'pending_items' not in context.user_data:
+        context.user_data['pending_items'] = []
     
-    # Maintain a list of photos sent in a batch/album
-    if 'pending_photos' not in context.user_data:
-        context.user_data['pending_photos'] = []
-        
-    context.user_data['pending_photos'].append(photo_file_id)
+    context.user_data['pending_items'].append(('photo', photo_file_id))
 
-    # Only send prompt message once for the entire batch
     if not context.user_data.get('asked_topic'):
         context.user_data['asked_topic'] = True
         await update.message.reply_text(
-            "📌 **Screenshot(s) received!**\nPlease reply with the **#topic** (e.g., `#21`, `#chemistry`):",
+            "📌 **Content received!**\nPlease reply with the **#topic** (e.g., `#21`, `#chemistry`):",
+            parse_mode="Markdown"
+        )
+    return WAITING_FOR_TOPIC
+
+async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text_content = update.message.text.strip()
+    if text_content.startswith("/"):
+        return
+
+    if 'pending_items' not in context.user_data:
+        context.user_data['pending_items'] = []
+    
+    context.user_data['pending_items'].append(('text', text_content))
+
+    if not context.user_data.get('asked_topic'):
+        context.user_data['asked_topic'] = True
+        await update.message.reply_text(
+            "📝 **Text received!**\nPlease reply with the **#topic** (e.g., `#21`, `#chemistry`):",
             parse_mode="Markdown"
         )
     return WAITING_FOR_TOPIC
@@ -110,53 +133,69 @@ async def receive_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not topic.startswith("#"):
         topic = f"#{topic}"
         
-    file_ids = context.user_data.get('pending_photos', [])
-    if not file_ids:
-        await update.message.reply_text("❌ Session expired. Please resend the photo(s).")
+    items = context.user_data.get('pending_items', [])
+    if not items:
+        await update.message.reply_text("❌ Session expired. Please resend your items.")
         return ConversationHandler.END
 
-    status_msg = await update.message.reply_text(f"💾 Saving {len(file_ids)} screenshot(s)...")
+    status_msg = await update.message.reply_text(f"💾 Saving {len(items)} item(s)...")
 
-    # Save all accumulated images to Database
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    for f_id in file_ids:
-        cursor.execute("INSERT INTO screenshots (file_id, topic) VALUES (?, ?)", (f_id, topic))
-        if CHANNEL_ID:
+    for item_type, content in items:
+        cursor.execute("INSERT INTO content_store (type, content, topic) VALUES (?, ?, ?)", (item_type, content, topic))
+        if item_type == 'photo' and CHANNEL_ID:
             try:
                 caption = f"📝 **Topic:** {topic}\n📅 {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-                await context.bot.send_photo(chat_id=CHANNEL_ID, photo=f_id, caption=caption, parse_mode="Markdown")
+                await context.bot.send_photo(chat_id=CHANNEL_ID, photo=content, caption=caption, parse_mode="Markdown")
             except Exception as e:
                 logger.error(f"Failed to post to channel: {e}")
     conn.commit()
     conn.close()
 
-    await status_msg.edit_text(f"✅ **Saved {len(file_ids)} screenshot(s) under {topic}!**", parse_mode="Markdown")
+    await status_msg.edit_text(f"✅ **Saved {len(items)} item(s) under {topic}!**", parse_mode="Markdown")
     
-    # Reset context state
-    context.user_data.pop('pending_photos', None)
+    context.user_data.pop('pending_items', None)
     context.user_data.pop('asked_topic', None)
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.pop('pending_photos', None)
+    context.user_data.pop('pending_items', None)
     context.user_data.pop('asked_topic', None)
     await update.message.reply_text("Action canceled.")
     return ConversationHandler.END
-# ----------------- Fast PDF Generator Engine -----------------
+
+# ----------------- Interactive Menu Handler -----------------
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data == "menu_daily":
+        today = datetime.now().strftime("%Y-%m-%d") + "%"
+        sql = "SELECT id, type, content, topic, timestamp FROM content_store WHERE timestamp LIKE ? ORDER BY timestamp ASC"
+        await generate_and_send_pdf(update, context, sql, (today,), "Daily Study Notes (All Topics)")
+    elif data == "menu_weekly":
+        week_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+        week_heading = f"Weekly Report ({ (datetime.now() - timedelta(days=7)).strftime('%d %b %Y') } to { datetime.now().strftime('%d %b %Y') })"
+        sql = "SELECT id, type, content, topic, timestamp FROM content_store WHERE timestamp >= ? ORDER BY timestamp ASC"
+        await generate_and_send_pdf(update, context, sql, (week_ago,), week_heading)
+    elif data == "menu_monthly":
+        month_ago = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+        sql = "SELECT id, type, content, topic, timestamp FROM content_store WHERE timestamp >= ? ORDER BY timestamp ASC"
+        await generate_and_send_pdf(update, context, sql, (month_ago,), "Monthly Study Notes (All Topics)")
+    elif data == "menu_topic":
+        await query.message.reply_text("🏷️ Please reply with the topic you want (e.g., `/topic_pdf 21` or type `/topics` to see available list).")
+
+# ----------------- Fast Multi-Image / Text PDF Engine -----------------
 
 async def fetch_image(bot, file_id, idx):
-    """Helper to download and optimize images concurrently."""
     try:
         tg_file = await bot.get_file(file_id)
         img_bytes = await tg_file.download_as_bytearray()
-        
-        # Load and convert image safely
         img = Image.open(BytesIO(img_bytes)).convert("RGB")
-        
-        # Fast resize for PDF canvas (Max width 1200px keeps print sharp & fast)
         img.thumbnail((1200, 1600), Image.Resampling.LANCZOS)
-        
         temp_path = f"temp_{idx}.jpg"
         img.save(temp_path, "JPEG", quality=85, optimize=True)
         return idx, temp_path
@@ -165,7 +204,8 @@ async def fetch_image(bot, file_id, idx):
         return idx, None
 
 async def generate_and_send_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, query_sql: str, params: tuple, title: str):
-    await update.message.reply_text("⏳ Compiling PDF fast... Please wait.")
+    message_to_edit = update.message if update.message else update.callback_query.message
+    await message_to_edit.reply_text("⏳ Compiling smart PDF... Please wait.")
 
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
@@ -174,105 +214,179 @@ async def generate_and_send_pdf(update: Update, context: ContextTypes.DEFAULT_TY
     conn.close()
 
     if not records:
-        await update.message.reply_text("⚠️ No screenshots found for this timeframe or topic.")
+        await message_to_edit.reply_text("⚠️ No records found for this selection.")
         return
 
-    # 1. Download all images concurrently in parallel (Super Fast!)
-    download_tasks = [
-        fetch_image(context.bot, record[1], idx) 
-        for idx, record in enumerate(records, start=1)
-    ]
+    # Download images concurrently
+    photo_records = [(r, idx) for idx, r in enumerate(records) if r[1] == 'photo']
+    download_tasks = [fetch_image(context.bot, r[2], idx) for r, idx in photo_records]
     downloaded_images = await asyncio.gather(*download_tasks)
-    
-    # Sort images back in correct order
-    downloaded_images.sort(key=lambda x: x[0])
+    img_map = {idx: path for idx, path in downloaded_images if path}
 
-    # 2. Build PDF Document
     pdf_buffer = BytesIO()
     c = canvas.Canvas(pdf_buffer, pagesize=A4)
     page_w, page_h = A4
-    total_count = len(records)
 
-    for idx, temp_path in downloaded_images:
-        if not temp_path or not os.path.exists(temp_path):
-            continue
+    i = 0
+    total_records = len(records)
+    page_num = 1
 
-        record = records[idx - 1]
-        topic_tag, ts_str = record[2], record[3]
-
+    while i < total_records:
         # Header Banner
         c.setFillColor(colors.HexColor("#2C3E50"))
-        c.rect(0, page_h - 45, page_w, 45, fill=True, stroke=False)
-
+        c.rect(0, page_h - 40, page_w, 40, fill=True, stroke=False)
         c.setFillColor(colors.white)
-        c.setFont("Helvetica-Bold", 11)
-        c.drawString(20, page_h - 28, f"Topic: {safe_str(topic_tag)}")
-        c.drawRightString(page_w - 20, page_h - 28, f"Date: {ts_str[:10]}")
+        c.setFont("Helvetica-Bold", 10)
+        c.drawString(20, page_h - 25, f"Title: {safe_str(title)}")
 
-        # Image Dimensions calculation
-        img = Image.open(temp_path)
-        orig_w, orig_h = img.size
-        aspect = orig_w / float(orig_h)
+        # Check if current and next record are small enough to pack 2 on one page
+        current_rec = records[i]
+        current_type = current_rec[1]
 
-        max_w = page_w - 40
-        max_h = page_h - 70
+        # Try 2-up packing if both are photos or short text
+        next_rec = records[i + 1] if i + 1 < total_records else None
+        
+        can_pack_two = False
+        if next_rec and current_type == 'photo' and next_rec[1] == 'photo':
+            if i in img_map and (i + 1) in img_map:
+                can_pack_two = True
 
-        if max_w / max_h < aspect:
-            draw_w = max_w
-            draw_h = max_w / aspect
+        if can_pack_two:
+            # --- TWO ITEMS ON ONE PAGE ---
+            items_to_draw = [(records[i], img_map[i]), (records[i+1], img_map[i+1])]
+            y_offsets = [page_h - 50, (page_h / 2) - 30]
+
+            for slot_idx, (rec, temp_path) in enumerate(items_to_draw):
+                y_base = y_offsets[slot_idx]
+                topic_tag, ts_str = rec[3], rec[4]
+
+                c.setFillColor(colors.HexColor("#34495E"))
+                c.setFont("Helvetica-Bold", 9)
+                c.drawString(20, y_base - 12, f"Topic: {safe_str(topic_tag)} | Date: {ts_str[:16]} (#{rec[0]})")
+
+                img = Image.open(temp_path)
+                orig_w, orig_h = img.size
+                aspect = orig_w / float(orig_h)
+
+                max_w = page_w - 40
+                max_h = (page_h / 2) - 60
+
+                if max_w / max_h < aspect:
+                    draw_w = max_w
+                    draw_h = max_w / aspect
+                else:
+                    draw_h = max_h
+                    draw_w = max_h * aspect
+
+                x = (page_w - draw_w) / 2
+                y_img = y_base - 20 - draw_h
+                c.drawImage(temp_path, x, y_img, width=draw_w, height=draw_h)
+
+            i += 2
         else:
-            draw_h = max_h
-            draw_w = max_h * aspect
+            # --- SINGLE FULL PAGE ITEM ---
+            rec = current_rec
+            topic_tag, ts_str = rec[3], rec[4]
+            c.setFillColor(colors.HexColor("#34495E"))
+            c.setFont("Helvetica-Bold", 10)
+            c.drawString(20, page_h - 60, f"Topic: {safe_str(topic_tag)} | Date: {ts_str[:16]} (#{rec[0]})")
 
-        x = (page_w - draw_w) / 2
-        y_img = (page_h - 45 - draw_h) / 2
+            if current_type == 'photo' and i in img_map:
+                temp_path = img_map[i]
+                img = Image.open(temp_path)
+                orig_w, orig_h = img.size
+                aspect = orig_w / float(orig_h)
 
-        c.drawImage(temp_path, x, y_img, width=draw_w, height=draw_h)
+                max_w = page_w - 40
+                max_h = page_h - 100
+
+                if max_w / max_h < aspect:
+                    draw_w = max_w
+                    draw_h = max_w / aspect
+                else:
+                    draw_h = max_h
+                    draw_w = max_h * aspect
+
+                x = (page_w - draw_w) / 2
+                y_img = (page_h - 75 - draw_h) / 2
+                c.drawImage(temp_path, x, y_img, width=draw_w, height=draw_h)
+            elif current_type == 'text':
+                c.setFillColor(colors.black)
+                c.setFont("Helvetica", 12)
+                text_content = safe_str(rec[2])
+                c.drawString(30, page_h - 120, text_content[:100]) # Quick render for text block
+
+            i += 1
 
         # Footer
         c.setFillColor(colors.HexColor("#7F8C8D"))
         c.setFont("Helvetica", 9)
-        c.drawRightString(page_w - 20, 15, f"Page {idx} of {total_count}")
+        c.drawRightString(page_w - 20, 15, f"Page {page_num}")
+        page_num += 1
 
         c.showPage()
-        
-        # Cleanup temp file
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+
+    # Cleanup temp paths
+    for path in img_map.values():
+        if os.path.exists(path):
+            os.remove(path)
 
     c.save()
     pdf_buffer.seek(0)
 
-    clean_filename = f"Study_Notes_{datetime.now().strftime('%Y%m%d')}.pdf"
+    clean_filename = f"Study_Report_{datetime.now().strftime('%Y%m%d')}.pdf"
+    chat_id = update.effective_chat.id
     await context.bot.send_document(
-        chat_id=update.effective_chat.id,
+        chat_id=chat_id,
         document=pdf_buffer,
         filename=clean_filename,
-        caption=f"📄 **{title}** Ready!\nTotal {total_count} page(s) compiled."
+        caption=f"📄 **{title}** Ready!"
     )
-# PDF Command Handlers
+
+# PDF Command Handlers (With & Without Topic)
 async def daily_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    today = datetime.now().strftime("%Y-%m-%d") + "%"
-    sql = "SELECT id, file_id, topic, timestamp FROM screenshots WHERE timestamp LIKE ? ORDER BY id ASC"
-    await generate_and_send_pdf(update, context, sql, (today,), "Daily Study Notes")
+    if context.args:
+        topic = context.args[0].strip().replace("#", "")
+        sql = "SELECT id, type, content, topic, timestamp FROM content_store WHERE timestamp LIKE ? AND LOWER(topic) LIKE ? ORDER BY timestamp ASC"
+        today = datetime.now().strftime("%Y-%m-%d") + "%"
+        await generate_and_send_pdf(update, context, sql, (today, f"%{topic.lower()}%"), f"Daily Notes - #{topic}")
+    else:
+        today = datetime.now().strftime("%Y-%m-%d") + "%"
+        sql = "SELECT id, type, content, topic, timestamp FROM content_store WHERE timestamp LIKE ? ORDER BY timestamp ASC"
+        await generate_and_send_pdf(update, context, sql, (today,), "Daily Notes (All)")
 
 async def weekly_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    week_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
-    sql = "SELECT id, file_id, topic, timestamp FROM screenshots WHERE timestamp >= ? ORDER BY id ASC"
-    await generate_and_send_pdf(update, context, sql, (week_ago,), "Weekly Study Notes")
+    start_date = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+    end_date = datetime.now().strftime("%Y-%m-%d")
+    heading = f"Weekly Report ({start_date} to {end_date})"
+    
+    if context.args:
+        topic = context.args[0].strip().replace("#", "")
+        week_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+        sql = "SELECT id, type, content, topic, timestamp FROM content_store WHERE timestamp >= ? AND LOWER(topic) LIKE ? ORDER BY timestamp ASC"
+        await generate_and_send_pdf(update, context, sql, (week_ago, f"%{topic.lower()}%"), f"{heading} - #{topic}")
+    else:
+        week_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+        sql = "SELECT id, type, content, topic, timestamp FROM content_store WHERE timestamp >= ? ORDER BY timestamp ASC"
+        await generate_and_send_pdf(update, context, sql, (week_ago,), heading)
 
 async def monthly_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    month_ago = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
-    sql = "SELECT id, file_id, topic, timestamp FROM screenshots WHERE timestamp >= ? ORDER BY id ASC"
-    await generate_and_send_pdf(update, context, sql, (month_ago,), "Monthly Study Notes")
+    if context.args:
+        topic = context.args[0].strip().replace("#", "")
+        month_ago = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+        sql = "SELECT id, type, content, topic, timestamp FROM content_store WHERE timestamp >= ? AND LOWER(topic) LIKE ? ORDER BY timestamp ASC"
+        await generate_and_send_pdf(update, context, sql, (month_ago, f"%{topic.lower()}%"), f"Monthly Notes - #{topic}")
+    else:
+        month_ago = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+        sql = "SELECT id, type, content, topic, timestamp FROM content_store WHERE timestamp >= ? ORDER BY timestamp ASC"
+        await generate_and_send_pdf(update, context, sql, (month_ago,), "Monthly Notes (All)")
 
 async def topic_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("⚠️ Specify topic! Example: `/topic_pdf 21`", parse_mode="Markdown")
         return
-    
     user_topic = context.args[0].strip().replace("#", "")
-    sql = "SELECT id, file_id, topic, timestamp FROM screenshots WHERE LOWER(topic) LIKE ? ORDER BY id ASC"
+    sql = "SELECT id, type, content, topic, timestamp FROM content_store WHERE LOWER(topic) LIKE ? ORDER BY timestamp ASC"
     await generate_and_send_pdf(update, context, sql, (f"%{user_topic.lower()}%",), f"Topic PDF - #{user_topic}")
 
 # ----------------- Main Execution Block -----------------
@@ -281,7 +395,10 @@ async def main():
     application = Application.builder().token(BOT_TOKEN).build()
 
     conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.PHOTO, receive_photo)],
+        entry_points=[
+            MessageHandler(filters.PHOTO, receive_photo),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text)
+        ],
         states={
             WAITING_FOR_TOPIC: [
                 MessageHandler(filters.PHOTO, receive_photo),
@@ -296,6 +413,7 @@ async def main():
     application.add_handler(CommandHandler("weekly_pdf", weekly_pdf))
     application.add_handler(CommandHandler("monthly_pdf", monthly_pdf))
     application.add_handler(CommandHandler("topic_pdf", topic_pdf))
+    application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(conv_handler)
 
     await application.initialize()
