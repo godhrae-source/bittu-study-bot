@@ -59,11 +59,11 @@ def init_db():
 
 init_db()
 
-# Helper function to sanitize text for ReportLab Helvetica
+# Helper function to sanitize text for ReportLab standard canvas
 def safe_str(text: str) -> str:
     if not text:
         return ""
-    # Strip characters outside standard ASCII printable range to prevent PDF canvas crash
+    # Strip characters outside standard ASCII range to prevent ReportLab canvas crash
     return "".join(c if ord(c) < 128 else "" for c in text).strip() or "Study Note"
 
 # ----------------- AI Summary Helper -----------------
@@ -306,7 +306,7 @@ async def topic_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sql = "SELECT file_id, topic, summary, timestamp FROM screenshots WHERE LOWER(topic) LIKE ? ORDER BY id ASC"
     await generate_and_send_pdf(update, context, sql, (f"%{user_topic.lower()}%",), f"Topic PDF - #{user_topic}")
 
-# ----------------- Main Function -----------------
+# ----------------- Main Execution Block -----------------
 
 async def main():
     application = Application.builder().token(BOT_TOKEN).build()
@@ -328,10 +328,16 @@ async def main():
 
     await application.initialize()
     await application.start()
+    
+    # Drops pending updates from old instances to fix Conflict error
     await application.updater.start_polling(drop_pending_updates=True)
+    logger.info("Telegram Bot Polling Started!")
 
+    # Starts Flask web server for Render keep-alive
     await run_flask()
 
 if __name__ == "__main__":
-    asyncio.run(main())
-a
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Bot stopped.")
