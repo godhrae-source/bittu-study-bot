@@ -143,11 +143,29 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop('asked_topic', None)
     await update.message.reply_text("Action canceled.")
     return ConversationHandler.END
+# ----------------- Fast PDF Generator Engine -----------------
 
-# ----------------- PDF Generator Engine -----------------
+async def fetch_image(bot, file_id, idx):
+    """Helper to download and optimize images concurrently."""
+    try:
+        tg_file = await bot.get_file(file_id)
+        img_bytes = await tg_file.download_as_bytearray()
+        
+        # Load and convert image safely
+        img = Image.open(BytesIO(img_bytes)).convert("RGB")
+        
+        # Fast resize for PDF canvas (Max width 1200px keeps print sharp & fast)
+        img.thumbnail((1200, 1600), Image.Resampling.LANCZOS)
+        
+        temp_path = f"temp_{idx}.jpg"
+        img.save(temp_path, "JPEG", quality=85, optimize=True)
+        return idx, temp_path
+    except Exception as e:
+        logger.error(f"Error downloading photo {file_id}: {e}")
+        return idx, None
 
 async def generate_and_send_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, query_sql: str, params: tuple, title: str):
-    await update.message.reply_text("⏳ Compiling HD PDF... Please wait.")
+    await update.message.reply_text("⏳ Compiling PDF fast... Please wait.")
 
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
@@ -159,14 +177,28 @@ async def generate_and_send_pdf(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("⚠️ No screenshots found for this timeframe or topic.")
         return
 
+    # 1. Download all images concurrently in parallel (Super Fast!)
+    download_tasks = [
+        fetch_image(context.bot, record[1], idx) 
+        for idx, record in enumerate(records, start=1)
+    ]
+    downloaded_images = await asyncio.gather(*download_tasks)
+    
+    # Sort images back in correct order
+    downloaded_images.sort(key=lambda x: x[0])
+
+    # 2. Build PDF Document
     pdf_buffer = BytesIO()
     c = canvas.Canvas(pdf_buffer, pagesize=A4)
     page_w, page_h = A4
-
     total_count = len(records)
-    
-    for idx, record in enumerate(records, start=1):
-        file_id, topic_tag, ts_str = record[1], record[2], record[3]
+
+    for idx, temp_path in downloaded_images:
+        if not temp_path or not os.path.exists(temp_path):
+            continue
+
+        record = records[idx - 1]
+        topic_tag, ts_str = record[2], record[3]
 
         # Header Banner
         c.setFillColor(colors.HexColor("#2C3E50"))
@@ -177,19 +209,13 @@ async def generate_and_send_pdf(update: Update, context: ContextTypes.DEFAULT_TY
         c.drawString(20, page_h - 28, f"Topic: {safe_str(topic_tag)}")
         c.drawRightString(page_w - 20, page_h - 28, f"Date: {ts_str[:10]}")
 
-        # Image Download & Placement
-        tg_file = await context.bot.get_file(file_id)
-        img_bytes = await tg_file.download_as_bytearray()
-
-        img = Image.open(BytesIO(img_bytes))
-        temp_img_path = f"temp_{idx}.jpg"
-        img.save(temp_img_path, quality=95)
+        # Image Dimensions calculation
+        img = Image.open(temp_path)
+        orig_w, orig_h = img.size
+        aspect = orig_w / float(orig_h)
 
         max_w = page_w - 40
         max_h = page_h - 70
-
-        orig_w, orig_h = img.size
-        aspect = orig_w / float(orig_h)
 
         if max_w / max_h < aspect:
             draw_w = max_w
@@ -201,7 +227,7 @@ async def generate_and_send_pdf(update: Update, context: ContextTypes.DEFAULT_TY
         x = (page_w - draw_w) / 2
         y_img = (page_h - 45 - draw_h) / 2
 
-        c.drawImage(temp_img_path, x, y_img, width=draw_w, height=draw_h, preserveAspectRatio=True)
+        c.drawImage(temp_path, x, y_img, width=draw_w, height=draw_h)
 
         # Footer
         c.setFillColor(colors.HexColor("#7F8C8D"))
@@ -209,8 +235,10 @@ async def generate_and_send_pdf(update: Update, context: ContextTypes.DEFAULT_TY
         c.drawRightString(page_w - 20, 15, f"Page {idx} of {total_count}")
 
         c.showPage()
-        if os.path.exists(temp_img_path):
-            os.remove(temp_img_path)
+        
+        # Cleanup temp file
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
     c.save()
     pdf_buffer.seek(0)
@@ -222,7 +250,6 @@ async def generate_and_send_pdf(update: Update, context: ContextTypes.DEFAULT_TY
         filename=clean_filename,
         caption=f"📄 **{title}** Ready!\nTotal {total_count} page(s) compiled."
     )
-
 # PDF Command Handlers
 async def daily_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     today = datetime.now().strftime("%Y-%m-%d") + "%"
