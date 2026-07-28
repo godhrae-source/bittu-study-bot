@@ -70,17 +70,14 @@ class GujaratiSummarizer:
     
     def extract_keywords(self, text):
         """Extract important keywords from Gujarati text"""
-        # Clean text - keep Gujarati characters
         text = re.sub(r'[^\u0A80-\u0AFF\s]', '', text)
         words = text.split()
         
-        # Remove stopwords and count frequency
         word_freq = {}
         for word in words:
             if word not in self.stopwords and len(word) > 1:
                 word_freq[word] = word_freq.get(word, 0) + 1
         
-        # Sort by frequency
         sorted_words = sorted(word_freq.items(), key=lambda x: x[1], reverse=True)
         return [word for word, freq in sorted_words[:5]]
     
@@ -89,14 +86,12 @@ class GujaratiSummarizer:
         if not text or len(text.split()) <= 30:
             return text if text else "કોઈ ટેક્સ્ટ નથી."
         
-        # Split into sentences
         sentences = re.split(r'[.!?।]', text)
         sentences = [s.strip() for s in sentences if len(s.strip()) > 10]
         
         if len(sentences) <= 2:
             return text[:200] + '...'
         
-        # Score sentences based on keyword presence
         keywords = self.extract_keywords(text)
         sentence_scores = {}
         
@@ -105,17 +100,14 @@ class GujaratiSummarizer:
             for keyword in keywords:
                 if keyword in sentence:
                     score += 2
-            # Give higher score to first and last sentences
             if i == 0:
                 score += 3
             if i == len(sentences) - 1:
                 score += 2
             sentence_scores[sentence] = score
         
-        # Sort by score and select top sentences
         sorted_sentences = sorted(sentence_scores.items(), key=lambda x: x[1], reverse=True)
         
-        # Take top sentences until we reach max_words
         summary = []
         word_count = 0
         for sentence, score in sorted_sentences[:3]:
@@ -126,7 +118,6 @@ class GujaratiSummarizer:
             else:
                 break
         
-        # If no summary generated, take first sentence
         if not summary:
             summary = [sentences[0][:100]]
         
@@ -137,7 +128,6 @@ class GujaratiSummarizer:
         if not records:
             return "કોઈ સામગ્રી મળી નથી. (No content found)"
         
-        # Collect all text content
         all_text = []
         for rec in records:
             if rec['type'] == 'text':
@@ -147,11 +137,8 @@ class GujaratiSummarizer:
             return "ફક્ત ફોટાઓ છે, ટેક્સ્ટ સારાંશ ઉપલબ્ધ નથી.\n(Only photos, text summary not available)"
         
         combined_text = ' '.join(all_text)
-        
-        # Generate summary
         summary = self.generate_summary(combined_text, 150)
         
-        # Add Gujarati header
         header = "📝 સારાંશ (Summary)\n"
         footer = f"\n---\n📊 કુલ {len(records)} એન્ટ્રીઓ | {len(all_text)} ટેક્સ્ટ એન્ટ્રીઓ"
         
@@ -201,7 +188,6 @@ init_db()
 def safe_str(text: str) -> str:
     if not text:
         return ""
-    # Keep Gujarati characters
     return "".join(c if ord(c) < 128 or (0x0A80 <= ord(c) <= 0x0AFF) else "" for c in text).strip() or "Study Note"
 
 def get_cache_key(query_sql: str, params: tuple, title: str) -> str:
@@ -798,4 +784,197 @@ async def ai_summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     """Generate AI summary for today's content in Gujarati"""
     today = datetime.now().strftime("%Y-%m-%d") + "%"
     
-    conn = sqlite3.connect(
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM content_store WHERE timestamp LIKE ? ORDER BY timestamp ASC", (today,))
+    records = cursor.fetchall()
+    conn.close()
+    
+    if not records:
+        await update.message.reply_text(
+            "📝 *AI Summary*\n\n"
+            "આજે કોઈ સામગ્રી નથી.\n"
+            "No content found for today."
+        )
+        return
+    
+    # Generate summary
+    summary = summarizer.summarize_for_pdf(records, "Today's Summary")
+    
+    # Get topic-wise summary
+    topic_summaries = []
+    topics = {}
+    for rec in records:
+        topic = rec['topic']
+        if topic not in topics:
+            topics[topic] = []
+        topics[topic].append(rec)
+    
+    for topic, recs in topics.items():
+        topic_summary = summarizer.get_topic_summary(recs, topic)
+        topic_summaries.append(topic_summary)
+    
+    msg = "🤖 *AI Summary (Gujarati)*\n\n"
+    msg += f"📅 તારીખ: {datetime.now().strftime('%Y-%m-%d')}\n"
+    msg += f"📊 કુલ એન્ટ્રીઓ: {len(records)}\n\n"
+    msg += "---\n\n"
+    msg += summary
+    msg += "\n\n---\n\n"
+    msg += "📌 *વિષયવાર સારાંશ:*\n\n"
+    msg += "\n\n".join(topic_summaries)
+    
+    await update.message.reply_text(msg[:4000], parse_mode="Markdown")
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    help_text = """
+📚 *Bittu Study Bot Help*
+
+*📸 Save Content:*
+• Send photo → Reply with #topic
+• Send text → Reply with #topic
+
+*📊 Generate PDFs (with AI Gujarati Summary):*
+• /daily_pdf - Today's notes
+• /weekly_pdf - Last 7 days
+• /monthly_pdf - Last 30 days
+• /topic_pdf [topic] - Topic wise
+
+*🤖 AI Features:*
+• /aisummary - Today's AI summary in Gujarati
+• PDFs automatically include Gujarati summary
+
+*🔍 Search & Stats:*
+• /search [query] - Search notes
+• /stats - Study statistics
+• /alltopics - Show all topics
+• /mydata - Show recent entries
+
+*📌 Other:*
+• /start - Main menu
+• /cancel - Cancel operation
+• /clearcache - Clear PDF cache
+• /instant - Today's instant report
+
+*💡 Tips:*
+• Use #topic for organization
+• Choose from menu for quick actions
+• Cache makes PDFs faster!
+• PDFમાં Gujarati AI સારાંશ આપમેળે ઉમેરાય છે
+"""
+    await update.message.reply_text(help_text, parse_mode="Markdown")
+
+# ==================== BUTTON HANDLERS ====================
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    
+    if data.startswith("topic_select_"):
+        topic = data.replace("topic_select_", "")
+        sql = "SELECT id, type, content, topic, timestamp FROM content_store WHERE LOWER(topic) LIKE ? ORDER BY timestamp ASC"
+        await generate_and_send_pdf_with_summary(update, context, sql, (f"%{topic.lower()}%",),
+                                    f"Topic PDF - {topic}")
+        return
+    
+    if data == "menu_daily":
+        await daily_pdf(update, context)
+    elif data == "menu_weekly":
+        await weekly_pdf(update, context)
+    elif data == "menu_monthly":
+        await monthly_pdf(update, context)
+    elif data == "menu_topic":
+        topics = get_all_topics()
+        if topics:
+            keyboard = []
+            for topic in topics[:15]:
+                keyboard.append([InlineKeyboardButton(f"📌 {topic}", callback_data=f"topic_select_{topic}")])
+            keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="menu_back")])
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.message.edit_text(
+                "🏷️ *Select a topic:*\n\n"
+                "🏷️ *વિષય પસંદ કરો:*",
+                parse_mode="Markdown",
+                reply_markup=reply_markup
+            )
+        else:
+            await query.message.edit_text("⚠️ No topics found. Add some data first!")
+    elif data == "menu_my_data":
+        await my_data(update, context)
+    elif data == "menu_all_topics":
+        await all_topics(update, context)
+    elif data == "menu_instant":
+        await instant_report(update, context)
+    elif data == "menu_search":
+        await query.message.edit_text(
+            "🔍 *Search Notes*\n\n"
+            "Use `/search your query`\n"
+            "Example: `/search physics`"
+        )
+    elif data == "menu_stats":
+        await stats_command(update, context)
+    elif data == "menu_clear_cache":
+        pdf_cache.clear()
+        await query.message.edit_text("🗑️ Cache cleared successfully!")
+    elif data == "menu_ai_summary":
+        await ai_summary_command(update, context)
+    elif data == "menu_help":
+        await help_command(update, context)
+    elif data == "menu_back":
+        await start(update, context)
+
+# ==================== MAIN ====================
+async def main():
+    if not BOT_TOKEN:
+        logger.error("BOT_TOKEN environment variable not set!")
+        return
+    
+    application = Application.builder().token(BOT_TOKEN).build()
+    
+    # Conversation handler
+    conv_handler = ConversationHandler(
+        entry_points=[
+            MessageHandler(filters.PHOTO, receive_photo),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text),
+        ],
+        states={
+            WAITING_FOR_TOPIC: [
+                MessageHandler(filters.PHOTO, receive_photo),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_topic),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+    
+    # Add handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("daily_pdf", daily_pdf))
+    application.add_handler(CommandHandler("weekly_pdf", weekly_pdf))
+    application.add_handler(CommandHandler("monthly_pdf", monthly_pdf))
+    application.add_handler(CommandHandler("topic_pdf", topic_pdf))
+    application.add_handler(CommandHandler("clearcache", clear_cache))
+    application.add_handler(CommandHandler("alltopics", all_topics))
+    application.add_handler(CommandHandler("mydata", my_data))
+    application.add_handler(CommandHandler("instant", instant_report))
+    application.add_handler(CommandHandler("search", search_notes))
+    application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(CommandHandler("aisummary", ai_summary_command))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("cancel", cancel))
+    application.add_handler(CallbackQueryHandler(button_handler))
+    application.add_handler(conv_handler)
+    
+    # Start bot
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling(drop_pending_updates=True)
+    logger.info("🚀 Bot Started Successfully!")
+    
+    # Start Flask
+    await run_flask()
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Bot stopped.")
