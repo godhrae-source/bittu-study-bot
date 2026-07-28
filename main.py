@@ -5,12 +5,13 @@ import sqlite3
 from datetime import datetime, timedelta
 from io import BytesIO
 from PIL import Image
-import reportlab
-from reportlab.lib.pagesizes import letter
+
+from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
+from reportlab.lib import colors
 
 from flask import Flask
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -55,7 +56,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Bittu Study Bot with PDF Generator is Active!"
+    return "Bittu Study Bot HD PDF Generator is Active!"
 
 async def run_flask():
     port = int(os.environ.get("PORT", 10000))
@@ -68,14 +69,14 @@ async def run_flask():
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
-        "📚 *Welcome to Bittu Study Notes Bot!*\n\n"
+        "📚 *Bittu Study Notes HD PDF Bot*\n\n"
         "📸 **How to save notes:**\n"
         "Send any screenshot, and I will ask you for the `#topic` before saving.\n\n"
-        "📄 **Get Compiled PDFs:**\n"
-        "• `/daily_pdf` - PDF of today's notes\n"
-        "• `/weekly_pdf` - PDF of the last 7 days\n"
-        "• `/monthly_pdf` - PDF of the last 30 days\n"
-        "• `/topic_pdf #topic` - PDF filtered by specific topic"
+        "📄 **Get HD Compiled PDFs with Summary:**\n"
+        "• `/daily_pdf` - HD PDF of today's notes\n"
+        "• `/weekly_pdf` - HD PDF of the last 7 days\n"
+        "• `/monthly_pdf` - HD PDF of the last 30 days\n"
+        "• `/topic_pdf #topic` - HD PDF filtered by specific topic"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
@@ -85,7 +86,7 @@ async def receive_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['pending_photo'] = photo_file_id
     
     await update.message.reply_text(
-        "📌 **Screenshot received!**\nPlease reply with the **#topic** (e.g., `#chemistry`, `#pedagogy`, `#maths`):",
+        "📌 **Screenshot received!**\nPlease reply with the **#topic** (e.g., `#શિક્ષણ`, `#chemistry`, `#pedagogy`):",
         parse_mode="Markdown"
     )
     return WAITING_FOR_TOPIC
@@ -130,10 +131,10 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Action canceled.")
     return ConversationHandler.END
 
-# ----------------- PDF Generator Engine -----------------
+# ----------------- Advanced HD PDF Generator Engine -----------------
 
 async def generate_and_send_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, query_sql: str, params: tuple, title: str):
-    await update.message.reply_text("⏳ Generating PDF document... Please wait.")
+    await update.message.reply_text("⏳ Generating HD PDF document with summary... Please wait.")
 
     conn = sqlite3.connect("study_data.db")
     cursor = conn.cursor()
@@ -146,64 +147,158 @@ async def generate_and_send_pdf(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     pdf_buffer = BytesIO()
-    c = canvas.Canvas(pdf_buffer, pagesize=letter)
-    width, height = letter
+    c = canvas.Canvas(pdf_buffer, pagesize=A4)
+    page_w, page_h = A4
 
-    for record in records:
-        file_id, topic, timestamp = record
-        
-        # Download image from Telegram
+    # ---------------- PAGE 1: Summary & Index Page ----------------
+    c.setFillColor(colors.HexColor("#1A2B4C"))  # Dark Blue Banner
+    c.rect(0, page_h - 100, page_w, 100, fill=True, stroke=False)
+
+    c.setFillColor(colors.white)
+    c.setFont("Helvetica-Bold", 22)
+    c.drawString(30, page_h - 45, title)
+    c.setFont("Helvetica", 12)
+    c.drawString(30, page_h - 70, f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S (%A)')}")
+
+    # Summary Section Content
+    c.setFillColor(colors.HexColor("#333333"))
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(30, page_h - 130, "📌 Study Material Summary")
+
+    c.setFont("Helvetica", 11)
+    c.drawString(40, page_h - 155, f"• Total Screenshots Included: {len(records)} page(s)")
+
+    # Extract unique topics
+    topics = list(set([r[1] for r in records]))
+    c.drawString(40, page_h - 175, f"• Topics Covered: {', '.join(topics)}")
+
+    # Index Table Header
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(30, page_h - 220, "Index Log:")
+    
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(30, page_h - 240, "#")
+    c.drawString(60, page_h - 240, "Date & Day")
+    c.drawString(240, page_h - 240, "Topic Tag")
+    c.drawString(450, page_h - 240, "Page")
+    
+    c.setLineWidth(0.5)
+    c.setStrokeColor(colors.gray)
+    c.line(30, page_h - 245, page_w - 30, page_h - 245)
+
+    y_pos = page_h - 265
+    c.setFont("Helvetica", 10)
+    
+    for idx, record in enumerate(records, start=1):
+        _, topic_tag, ts_str = record
+        try:
+            dt_obj = datetime.strptime(ts_str, '%Y-%m-%d %H:%M:%S')
+            formatted_date = dt_obj.strftime('%Y-%m-%d (%a)')
+        except Exception:
+            formatted_date = ts_str
+
+        c.drawString(30, y_pos, str(idx))
+        c.drawString(60, y_pos, formatted_date)
+        c.drawString(240, y_pos, topic_tag)
+        c.drawString(450, y_pos, f"Page {idx + 1}")
+        y_pos -= 20
+
+        if y_pos < 50:
+            c.showPage()
+            y_pos = page_h - 50
+
+    c.showPage()  # Move to Page 2 for actual screenshot pages
+
+    # ---------------- SCREENSHOT PAGES ----------------
+    for idx, record in enumerate(records, start=1):
+        file_id, topic_tag, ts_str = record
+
+        try:
+            dt_obj = datetime.strptime(ts_str, '%Y-%m-%d %H:%M:%S')
+            formatted_date = dt_obj.strftime('%Y-%m-%d (%A)')
+        except Exception:
+            formatted_date = ts_str
+
+        # Draw Header Banner on every page
+        c.setFillColor(colors.HexColor("#2C3E50"))
+        c.rect(0, page_h - 50, page_w, 50, fill=True, stroke=False)
+
+        c.setFillColor(colors.white)
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(20, page_h - 30, f"Topic: {topic_tag}")
+        c.setFont("Helvetica", 10)
+        c.drawRightString(page_w - 20, page_h - 30, f"Date: {formatted_date}")
+
+        # Download high quality image
         tg_file = await context.bot.get_file(file_id)
         img_bytes = await tg_file.download_as_bytearray()
-        
+
         img = Image.open(BytesIO(img_bytes))
-        img_temp_path = f"temp_{file_id}.jpg"
-        img.save(img_temp_path)
+        img_temp_path = f"temp_{idx}_{file_id}.jpg"
+        img.save(img_temp_path, quality=95)
 
-        # Draw Header info on PDF Page
-        c.setFont("Helvetica-Bold", 14)
-        c.drawString(40, height - 40, f"Topic: {topic}")
-        c.setFont("Helvetica", 10)
-        c.drawString(40, height - 55, f"Date: {timestamp}")
+        # Calculate fit dimensions without cropping or altering aspect ratio
+        max_width = page_w - 40   # 20pt margin left/right
+        max_height = page_h - 80  # Space under header
 
-        # Draw Image onto PDF Page
-        c.drawImage(img_temp_path, 40, 40, width=width - 80, height=height - 110, preserveAspectRatio=True)
+        orig_w, orig_h = img.size
+        aspect = orig_w / float(orig_h)
+
+        if max_width / max_height < aspect:
+            draw_w = max_width
+            draw_h = max_width / aspect
+        else:
+            draw_h = max_height
+            draw_w = max_height * aspect
+
+        x_pos = (page_w - draw_w) / 2
+        y_pos = (page_h - 50 - draw_h) / 2
+
+        # Draw image
+        c.drawImage(img_temp_path, x_pos, y_pos, width=draw_w, height=draw_h, preserveAspectRatio=True)
+
+        # Footer page number
+        c.setFillColor(colors.HexColor("#7F8C8D"))
+        c.setFont("Helvetica", 9)
+        c.drawRightString(page_w - 20, 15, f"Page {idx + 1} of {len(records) + 1}")
+
         c.showPage()
 
-        # Clean up temporary file
+        # Clean temp image file
         if os.path.exists(img_temp_path):
             os.remove(img_temp_path)
 
     c.save()
     pdf_buffer.seek(0)
-    pdf_buffer.name = f"{title.replace(' ', '_')}.pdf"
+    pdf_file_name = f"{title.replace(' ', '_')}.pdf"
 
-    # Send PDF document back to user
+    # Send HD PDF to Telegram
     await context.bot.send_document(
         chat_id=update.effective_chat.id,
         document=pdf_buffer,
-        caption=f"📄 **{title}** ready!"
+        filename=pdf_file_name,
+        caption=f"📄 **{title}**\nIncludes {len(records)} page(s) + Summary."
     )
 
 # PDF Command Handlers
 async def daily_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     today = datetime.now().strftime("%Y-%m-%d") + "%"
     sql = "SELECT file_id, topic, timestamp FROM screenshots WHERE timestamp LIKE ? ORDER BY id ASC"
-    await generate_and_send_pdf(update, context, sql, (today,), "Daily Study PDF")
+    await generate_and_send_pdf(update, context, sql, (today,), "Daily Study Notes")
 
 async def weekly_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     week_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
     sql = "SELECT file_id, topic, timestamp FROM screenshots WHERE timestamp >= ? ORDER BY id ASC"
-    await generate_and_send_pdf(update, context, sql, (week_ago,), "Weekly Study PDF")
+    await generate_and_send_pdf(update, context, sql, (week_ago,), "Weekly Study Notes")
 
 async def monthly_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     month_ago = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
     sql = "SELECT file_id, topic, timestamp FROM screenshots WHERE timestamp >= ? ORDER BY id ASC"
-    await generate_and_send_pdf(update, context, sql, (month_ago,), "Monthly Study PDF")
+    await generate_and_send_pdf(update, context, sql, (month_ago,), "Monthly Study Notes")
 
 async def topic_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("⚠️ Please specify a topic! Example: `/topic_pdf #chemistry`", parse_mode="Markdown")
+        await update.message.reply_text("⚠️ Please specify a topic! Example: `/topic_pdf #શિક્ષણ`", parse_mode="Markdown")
         return
     
     topic = context.args[0].strip()
