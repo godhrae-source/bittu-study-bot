@@ -71,18 +71,18 @@ async def summarize_image_with_ai(image_bytes: bytes) -> str:
         return "AI summary omitted (Set GEMINI_API_KEY in Render to enable)."
 
     try:
-        # Convert image to RGB to handle all image formats/transparency safely
         img = Image.open(BytesIO(image_bytes)).convert("RGB")
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-2.5-flash')
         prompt = (
-            "Analyze this study screenshot or newspaper clipping. "
+            "Analyze this study screenshot or newspaper clipping in Gujarati or English. "
             "Provide a concise summary in 2 short bullet points."
         )
         response = await asyncio.to_thread(model.generate_content, [prompt, img])
         return response.text.strip() if (response and response.text) else "Summary unavailable."
     except Exception as e:
         logger.error(f"Gemini AI error: {e}")
-        return f"AI Error: {str(e)[:50]}"  # Shows exact error in Telegram if it fails
+        return f"AI Error: {str(e)[:50]}"
+
 
 
 # ----------------- Flask Web Server for Render -----------------
