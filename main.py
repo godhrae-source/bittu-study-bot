@@ -4,6 +4,7 @@ import logging
 import sqlite3
 import hashlib
 import time
+import re
 from datetime import datetime, timedelta
 from io import BytesIO
 from PIL import Image
@@ -14,7 +15,7 @@ from reportlab.pdfgen import canvas
 from reportlab.lib import colors
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Image as RLImage
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from reportlab.lib.utils import ImageReader
 
 from flask import Flask, jsonify
@@ -51,6 +52,132 @@ MAX_WORKERS = 4
 executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
 pdf_cache = {}
 
+# ==================== GUJARATI AI SUMMARIZER ====================
+class GujaratiSummarizer:
+    """Simple AI summarizer for Gujarati text"""
+    
+    def __init__(self):
+        # Common Gujarati stopwords
+        self.stopwords = {
+            'અને', 'આ', 'આવી', 'આવું', 'આવો', 'આવા', 'એ', 'એક', 
+            'એમ', 'એવા', 'એવું', 'એવી', 'કે', 'કરી', 'કરે', 'કર્યું',
+            'છે', 'છેઅ', 'છેતો', 'જ', 'જે', 'તે', 'તેમ', 'તેને',
+            'તેની', 'તેનું', 'તેના', 'તો', 'થઈ', 'થયું', 'થાય',
+            'થી', 'દ્વારા', 'ને', 'પણ', 'પર', 'પ્રમાણે', 'માટે',
+            'મા', 'માં', 'રહી', 'રહે', 'વગેરે', 'વાળું', 'સાથે',
+            'સુધી', 'હતા', 'હતી', 'હતું', 'હતો', 'હવે', 'હોય'
+        }
+    
+    def extract_keywords(self, text):
+        """Extract important keywords from Gujarati text"""
+        # Clean text - keep Gujarati characters
+        text = re.sub(r'[^\u0A80-\u0AFF\s]', '', text)
+        words = text.split()
+        
+        # Remove stopwords and count frequency
+        word_freq = {}
+        for word in words:
+            if word not in self.stopwords and len(word) > 1:
+                word_freq[word] = word_freq.get(word, 0) + 1
+        
+        # Sort by frequency
+        sorted_words = sorted(word_freq.items(), key=lambda x: x[1], reverse=True)
+        return [word for word, freq in sorted_words[:5]]
+    
+    def generate_summary(self, text, max_words=150):
+        """Generate summary of Gujarati text"""
+        if not text or len(text.split()) <= 30:
+            return text if text else "કોઈ ટેક્સ્ટ નથી."
+        
+        # Split into sentences
+        sentences = re.split(r'[.!?।]', text)
+        sentences = [s.strip() for s in sentences if len(s.strip()) > 10]
+        
+        if len(sentences) <= 2:
+            return text[:200] + '...'
+        
+        # Score sentences based on keyword presence
+        keywords = self.extract_keywords(text)
+        sentence_scores = {}
+        
+        for i, sentence in enumerate(sentences):
+            score = 0
+            for keyword in keywords:
+                if keyword in sentence:
+                    score += 2
+            # Give higher score to first and last sentences
+            if i == 0:
+                score += 3
+            if i == len(sentences) - 1:
+                score += 2
+            sentence_scores[sentence] = score
+        
+        # Sort by score and select top sentences
+        sorted_sentences = sorted(sentence_scores.items(), key=lambda x: x[1], reverse=True)
+        
+        # Take top sentences until we reach max_words
+        summary = []
+        word_count = 0
+        for sentence, score in sorted_sentences[:3]:
+            words = sentence.split()
+            if word_count + len(words) <= max_words:
+                summary.append(sentence)
+                word_count += len(words)
+            else:
+                break
+        
+        # If no summary generated, take first sentence
+        if not summary:
+            summary = [sentences[0][:100]]
+        
+        return ' '.join(summary) + '...'
+    
+    def summarize_for_pdf(self, records, title):
+        """Generate summary of all content in Gujarati"""
+        if not records:
+            return "કોઈ સામગ્રી મળી નથી. (No content found)"
+        
+        # Collect all text content
+        all_text = []
+        for rec in records:
+            if rec['type'] == 'text':
+                all_text.append(rec['content'])
+        
+        if not all_text:
+            return "ફક્ત ફોટાઓ છે, ટેક્સ્ટ સારાંશ ઉપલબ્ધ નથી.\n(Only photos, text summary not available)"
+        
+        combined_text = ' '.join(all_text)
+        
+        # Generate summary
+        summary = self.generate_summary(combined_text, 150)
+        
+        # Add Gujarati header
+        header = "📝 સારાંશ (Summary)\n"
+        footer = f"\n---\n📊 કુલ {len(records)} એન્ટ્રીઓ | {len(all_text)} ટેક્સ્ટ એન્ટ્રીઓ"
+        
+        return header + summary + footer
+    
+    def get_topic_summary(self, records, topic):
+        """Generate topic-specific summary in Gujarati"""
+        if not records:
+            return f"'{topic}' વિષય પર કોઈ સામગ્રી નથી."
+        
+        all_text = []
+        for rec in records:
+            if rec['type'] == 'text':
+                all_text.append(rec['content'])
+        
+        if not all_text:
+            return f"'{topic}' વિષય પર ફક્ત ફોટાઓ છે."
+        
+        combined_text = ' '.join(all_text)
+        summary = self.generate_summary(combined_text, 120)
+        
+        return f"📌 {topic} વિષયનો સારાંશ:\n\n{summary}"
+
+# Initialize summarizer
+summarizer = GujaratiSummarizer()
+
 # ==================== DATABASE ====================
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -74,7 +201,8 @@ init_db()
 def safe_str(text: str) -> str:
     if not text:
         return ""
-    return "".join(c if ord(c) < 128 else "" for c in text).strip() or "Study Note"
+    # Keep Gujarati characters
+    return "".join(c if ord(c) < 128 or (0x0A80 <= ord(c) <= 0x0AFF) else "" for c in text).strip() or "Study Note"
 
 def get_cache_key(query_sql: str, params: tuple, title: str) -> str:
     key_str = f"{query_sql}_{params}_{title}"
@@ -137,7 +265,6 @@ async def fetch_image_fast(bot, file_id, idx):
         file_bytes = await tg_file.download_as_bytearray()
         img = Image.open(BytesIO(file_bytes)).convert("RGB")
         
-        # Quick resize for speed
         if max(img.size) > 1200:
             img.thumbnail((1200, 1200), Image.Resampling.LANCZOS)
         
@@ -148,9 +275,9 @@ async def fetch_image_fast(bot, file_id, idx):
         logger.error(f"Error downloading photo {file_id}: {e}")
         return idx, None
 
-# ==================== FAST PDF GENERATOR ====================
-def generate_pdf_fast(records, downloaded_images, title):
-    """Generate PDF quickly with good quality"""
+# ==================== PDF GENERATOR WITH GUJARATI SUMMARY ====================
+def generate_pdf_with_summary(records, downloaded_images, title, summary_text):
+    """Generate PDF with Gujarati summary on first page"""
     pdf_buffer = BytesIO()
     
     doc = SimpleDocTemplate(pdf_buffer, pagesize=A4,
@@ -160,14 +287,28 @@ def generate_pdf_fast(records, downloaded_images, title):
     story = []
     styles = getSampleStyleSheet()
     
-    # Simple styles for speed
+    # Custom styles
     header_style = ParagraphStyle(
         'CustomHeader',
         parent=styles['Heading1'],
-        fontSize=14,
+        fontSize=16,
         textColor=colors.HexColor('#2C3E50'),
         alignment=TA_CENTER,
         spaceAfter=15
+    )
+    
+    summary_style = ParagraphStyle(
+        'SummaryStyle',
+        parent=styles['Normal'],
+        fontSize=10,
+        textColor=colors.HexColor('#1A5276'),
+        leftIndent=15,
+        rightIndent=15,
+        spaceAfter=15,
+        backColor=colors.HexColor('#EBF5FB'),
+        borderPadding=10,
+        borderColor=colors.HexColor('#2980B9'),
+        borderWidth=1
     )
     
     topic_style = ParagraphStyle(
@@ -189,29 +330,34 @@ def generate_pdf_fast(records, downloaded_images, title):
         rightIndent=10
     )
     
-    # Header
+    # Title
     story.append(Paragraph(f"📚 {title}", header_style))
     story.append(Paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}", 
                           styles['Italic']))
-    story.append(Spacer(1, 15))
+    story.append(Spacer(1, 10))
     
+    # Gujarati Summary on first page
+    if summary_text:
+        story.append(Paragraph("📝 *AI સારાંશ (AI Summary)*", styles['Heading3']))
+        story.append(Paragraph(summary_text.replace('\n', '<br/>'), summary_style))
+        story.append(Spacer(1, 15))
+    
+    # Content
     for idx, rec in enumerate(records):
         # Topic
-        topic_text = f"<b>Topic:</b> {rec['topic']} | <b>Date:</b> {rec['timestamp'][:16]}"
+        topic_text = f"<b>વિષય (Topic):</b> {rec['topic']} | <b>તારીખ (Date):</b> {rec['timestamp'][:16]}"
         story.append(Paragraph(topic_text, topic_style))
         story.append(Spacer(1, 5))
         
         if rec['type'] == 'photo' and idx in downloaded_images:
             img_path = downloaded_images[idx]
             try:
-                # Quick image sizing
                 img = Image.open(img_path)
                 img_width, img_height = img.size
                 
                 page_width = A4[0] - 60
-                page_height = A4[1] - 120
+                page_height = A4[1] - 150
                 
-                # Calculate best fit
                 ratio = min(page_width / img_width, page_height / img_height)
                 width = img_width * ratio * 0.9
                 height = img_height * ratio * 0.9
@@ -222,11 +368,10 @@ def generate_pdf_fast(records, downloaded_images, title):
                 
             except Exception as e:
                 logger.error(f"Error adding image {idx}: {e}")
-                story.append(Paragraph("⚠️ Image error", text_style))
+                story.append(Paragraph("⚠️ ચિત્ર લોડ કરી શકાયું નહીં", text_style))
             
         elif rec['type'] == 'text':
             text_content = safe_str(rec['content'])
-            # Simple text formatting
             if len(text_content) > 500:
                 text_content = text_content[:500] + "..."
             story.append(Paragraph(text_content, text_style))
@@ -237,7 +382,7 @@ def generate_pdf_fast(records, downloaded_images, title):
     
     # Footer
     story.append(Spacer(1, 15))
-    story.append(Paragraph(f"<i>Generated by Bittu Study Bot - {len(records)} entries</i>", 
+    story.append(Paragraph(f"<i>📊 કુલ {len(records)} એન્ટ્રીઓ | Generated by Bittu Study Bot</i>", 
                           styles['Italic']))
     
     # Build PDF
@@ -255,31 +400,31 @@ def generate_pdf_fast(records, downloaded_images, title):
     return pdf_buffer
 
 # ==================== PDF GENERATION WITH PROGRESS ====================
-async def generate_and_send_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, 
-                                query_sql: str, params: tuple, title: str):
-    """Generate and send PDF with instant download"""
+async def generate_and_send_pdf_with_summary(update: Update, context: ContextTypes.DEFAULT_TYPE, 
+                                              query_sql: str, params: tuple, title: str):
+    """Generate and send PDF with Gujarati AI summary"""
     chat_id = update.effective_chat.id
     
-    # Get the message to edit
+    # Get message to edit
     if update.message:
-        status_msg = await update.message.reply_text("⏳ Generating PDF...")
+        status_msg = await update.message.reply_text("⏳ PDF બનાવી રહ્યા છીએ...")
     elif update.callback_query:
-        status_msg = await update.callback_query.message.reply_text("⏳ Generating PDF...")
+        status_msg = await update.callback_query.message.reply_text("⏳ PDF બનાવી રહ્યા છીએ...")
     else:
         return
     
     try:
-        # Check cache first
+        # Check cache
         cache_key = get_cache_key(query_sql, params, title)
         if cache_key in pdf_cache:
             cached_time, cached_pdf = pdf_cache[cache_key]
             if time.time() - cached_time < CACHE_EXPIRY:
-                await status_msg.edit_text("⚡ Sending cached PDF...")
+                await status_msg.edit_text("⚡ કેશમાંથી PDF મોકલીએ છીએ...")
                 await context.bot.send_document(
                     chat_id=chat_id,
                     document=BytesIO(cached_pdf),
                     filename=f"Study_Report_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
-                    caption=f"📄 **{title}** Ready!"
+                    caption=f"📄 **{title}** Ready! (Cached)"
                 )
                 await status_msg.delete()
                 return
@@ -293,17 +438,21 @@ async def generate_and_send_pdf(update: Update, context: ContextTypes.DEFAULT_TY
         conn.close()
 
         if not records:
-            await status_msg.edit_text("⚠️ No records found.")
+            await status_msg.edit_text("⚠️ કોઈ રેકોર્ડ મળ્યા નથી.")
             return
 
-        await status_msg.edit_text(f"📊 Processing {len(records)} items...")
+        await status_msg.edit_text(f"📊 {len(records)} આઇટમ્સ પ્રોસેસ કરી રહ્યા છીએ...")
 
-        # Download images in parallel
+        # Generate Gujarati summary
+        await status_msg.edit_text("🤖 AI સારાંશ બનાવી રહ્યા છીએ...")
+        summary = summarizer.summarize_for_pdf(records, title)
+
+        # Download images
         photo_records = [(idx, r) for idx, r in enumerate(records) if r['type'] == 'photo']
         downloaded_images = {}
         
         if photo_records:
-            await status_msg.edit_text(f"📸 Downloading {len(photo_records)} images...")
+            await status_msg.edit_text(f"📸 {len(photo_records)} ફોટાઓ ડાઉનલોડ કરી રહ્યા છીએ...")
             download_tasks = []
             for idx, rec in photo_records:
                 download_tasks.append(fetch_image_fast(context.bot, rec['content'], idx))
@@ -312,35 +461,35 @@ async def generate_and_send_pdf(update: Update, context: ContextTypes.DEFAULT_TY
             downloaded_images = {idx: path for idx, path in results if path}
 
         # Generate PDF
-        await status_msg.edit_text("📄 Creating PDF...")
+        await status_msg.edit_text("📄 PDF બનાવી રહ્યા છીએ...")
         loop = asyncio.get_event_loop()
         pdf_buffer = await loop.run_in_executor(
             executor,
-            generate_pdf_fast,
+            generate_pdf_with_summary,
             records,
             downloaded_images,
-            title
+            title,
+            summary
         )
 
         # Cache
         pdf_data = pdf_buffer.getvalue()
         pdf_cache[cache_key] = (time.time(), pdf_data)
 
-        # Send PDF immediately
-        await status_msg.edit_text("📤 Sending PDF...")
+        # Send PDF
+        await status_msg.edit_text("📤 PDF મોકલી રહ્યા છીએ...")
         await context.bot.send_document(
             chat_id=chat_id,
             document=BytesIO(pdf_data),
             filename=f"Study_Report_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
-            caption=f"📄 **{title}** Ready! ({len(records)} items)"
+            caption=f"📄 **{title}** Ready! ({len(records)} items)\n🤖 AI સારાંશ સાથે"
         )
         
-        # Delete status message
         await status_msg.delete()
         
     except Exception as e:
         logger.error(f"PDF generation error: {e}")
-        await status_msg.edit_text(f"❌ Error: {str(e)[:100]}")
+        await status_msg.edit_text(f"❌ એરર: {str(e)[:100]}")
 
 # ==================== BOT HANDLERS ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -355,7 +504,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
          InlineKeyboardButton("🔍 Search", callback_data="menu_search")],
         [InlineKeyboardButton("📊 Stats", callback_data="menu_stats"),
          InlineKeyboardButton("🗑️ Clear Cache", callback_data="menu_clear_cache")],
-        [InlineKeyboardButton("🤖 AI Help", callback_data="menu_ai"),
+        [InlineKeyboardButton("🤖 AI Summary", callback_data="menu_ai_summary"),
          InlineKeyboardButton("❓ Help", callback_data="menu_help")]
     ]
     
@@ -368,6 +517,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📊 **Generate PDFs:**\n"
         "Use buttons below or commands:\n"
         "/daily_pdf, /weekly_pdf, /monthly_pdf, /topic_pdf\n\n"
+        "🤖 **AI Feature:**\n"
+        "PDFમાં Gujarati AI સારાંશ ઉમેરાય છે.\n\n"
         "👇 *Use menu:*"
     )
     
@@ -386,7 +537,8 @@ async def receive_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get('asked_topic'):
         context.user_data['asked_topic'] = True
         await update.message.reply_text(
-            "📌 **Content received!**\nReply with **#topic** (e.g., `#chemistry`):",
+            "📌 **Content received!**\nReply with **#topic** (e.g., `#chemistry`):\n\n"
+            "📸 **સામગ્રી મળી!**\n**#topic** સાથે જવાબ આપો.",
             parse_mode="Markdown"
         )
     return WAITING_FOR_TOPIC
@@ -404,7 +556,8 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get('asked_topic'):
         context.user_data['asked_topic'] = True
         await update.message.reply_text(
-            "📝 **Text received!**\nReply with **#topic** (e.g., `#chemistry`):",
+            "📝 **Text received!**\nReply with **#topic** (e.g., `#chemistry`):\n\n"
+            "📝 **લખાણ મળ્યું!**\n**#topic** સાથે જવાબ આપો.",
             parse_mode="Markdown"
         )
     return WAITING_FOR_TOPIC
@@ -419,7 +572,7 @@ async def receive_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Session expired. Please resend.")
         return ConversationHandler.END
     
-    status_msg = await update.message.reply_text(f"💾 Saving {len(items)} item(s)...")
+    status_msg = await update.message.reply_text(f"💾 {len(items)} item(s) સેવ થઈ રહ્યા છે...")
     
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
@@ -436,7 +589,7 @@ async def receive_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
     
-    await status_msg.edit_text(f"✅ **Saved {len(items)} item(s) under {topic}!**",
+    await status_msg.edit_text(f"✅ **{len(items)} item(s) under {topic} સેવ થયા!**",
                               parse_mode="Markdown")
     
     context.user_data.pop('pending_items', None)
@@ -455,12 +608,12 @@ async def daily_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
         topic = context.args[0].strip().replace("#", "")
         sql = "SELECT id, type, content, topic, timestamp FROM content_store WHERE timestamp LIKE ? AND LOWER(topic) LIKE ? ORDER BY timestamp ASC"
         today = datetime.now().strftime("%Y-%m-%d") + "%"
-        await generate_and_send_pdf(update, context, sql, (today, f"%{topic.lower()}%"),
+        await generate_and_send_pdf_with_summary(update, context, sql, (today, f"%{topic.lower()}%"),
                                     f"Daily Notes - #{topic}")
     else:
         today = datetime.now().strftime("%Y-%m-%d") + "%"
         sql = "SELECT id, type, content, topic, timestamp FROM content_store WHERE timestamp LIKE ? ORDER BY timestamp ASC"
-        await generate_and_send_pdf(update, context, sql, (today,), "Daily Notes (All)")
+        await generate_and_send_pdf_with_summary(update, context, sql, (today,), "Daily Notes (All)")
 
 async def weekly_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     start_date = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
@@ -471,24 +624,24 @@ async def weekly_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
         topic = context.args[0].strip().replace("#", "")
         week_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
         sql = "SELECT id, type, content, topic, timestamp FROM content_store WHERE timestamp >= ? AND LOWER(topic) LIKE ? ORDER BY timestamp ASC"
-        await generate_and_send_pdf(update, context, sql, (week_ago, f"%{topic.lower()}%"),
+        await generate_and_send_pdf_with_summary(update, context, sql, (week_ago, f"%{topic.lower()}%"),
                                     f"{heading} - #{topic}")
     else:
         week_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
         sql = "SELECT id, type, content, topic, timestamp FROM content_store WHERE timestamp >= ? ORDER BY timestamp ASC"
-        await generate_and_send_pdf(update, context, sql, (week_ago,), heading)
+        await generate_and_send_pdf_with_summary(update, context, sql, (week_ago,), heading)
 
 async def monthly_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args:
         topic = context.args[0].strip().replace("#", "")
         month_ago = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
         sql = "SELECT id, type, content, topic, timestamp FROM content_store WHERE timestamp >= ? AND LOWER(topic) LIKE ? ORDER BY timestamp ASC"
-        await generate_and_send_pdf(update, context, sql, (month_ago, f"%{topic.lower()}%"),
+        await generate_and_send_pdf_with_summary(update, context, sql, (month_ago, f"%{topic.lower()}%"),
                                     f"Monthly Notes - #{topic}")
     else:
         month_ago = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
         sql = "SELECT id, type, content, topic, timestamp FROM content_store WHERE timestamp >= ? ORDER BY timestamp ASC"
-        await generate_and_send_pdf(update, context, sql, (month_ago,), "Monthly Notes (All)")
+        await generate_and_send_pdf_with_summary(update, context, sql, (month_ago,), "Monthly Notes (All)")
 
 async def topic_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
@@ -501,7 +654,8 @@ async def topic_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup = InlineKeyboardMarkup(keyboard)
             
             await update.message.reply_text(
-                "🏷️ *Select a topic:*\n\nOr use `/topic_pdf topic_name`",
+                "🏷️ *Select a topic:*\n\nOr use `/topic_pdf topic_name`\n\n"
+                "🏷️ *વિષય પસંદ કરો:*",
                 parse_mode="Markdown",
                 reply_markup=reply_markup
             )
@@ -511,7 +665,7 @@ async def topic_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     user_topic = context.args[0].strip().replace("#", "")
     sql = "SELECT id, type, content, topic, timestamp FROM content_store WHERE LOWER(topic) LIKE ? ORDER BY timestamp ASC"
-    await generate_and_send_pdf(update, context, sql, (f"%{user_topic.lower()}%",),
+    await generate_and_send_pdf_with_summary(update, context, sql, (f"%{user_topic.lower()}%",),
                                 f"Topic PDF - #{user_topic}")
 
 async def clear_cache(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -560,7 +714,7 @@ async def my_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def instant_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     today = datetime.now().strftime("%Y-%m-%d") + "%"
     sql = "SELECT id, type, content, topic, timestamp FROM content_store WHERE timestamp LIKE ? ORDER BY timestamp ASC"
-    await generate_and_send_pdf(update, context, sql, (today,), "📊 Instant Report - Today")
+    await generate_and_send_pdf_with_summary(update, context, sql, (today,), "📊 Instant Report - Today")
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect(DB_FILE)
@@ -640,226 +794,8 @@ async def search_notes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(msg, parse_mode="Markdown")
 
-async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        help_text = """
-🤖 *AI Assistant Help*
-
-*Commands:*
-• /ai topics - List all topics
-• /ai count - Total notes count
-• /ai today - Today's notes count
-• /ai search [text] - Search notes
-
-*Examples:*
-• /ai topics
-• /ai count
-• /ai today
-• /ai search chemistry
-"""
-        await update.message.reply_text(help_text, parse_mode="Markdown")
-        return
+async def ai_summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Generate AI summary for today's content in Gujarati"""
+    today = datetime.now().strftime("%Y-%m-%d") + "%"
     
-    query = ' '.join(context.args).lower()
-    
-    if query == 'topics':
-        topics = get_all_topics()
-        if topics:
-            msg = "📋 *All Topics:*\n\n"
-            for topic in topics:
-                msg += f"• {topic}\n"
-            await update.message.reply_text(msg, parse_mode="Markdown")
-        else:
-            await update.message.reply_text("No topics found.")
-        
-    elif query == 'count':
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM content_store")
-        count = cursor.fetchone()[0]
-        conn.close()
-        await update.message.reply_text(f"📚 Total notes: {count}")
-        
-    elif query == 'today':
-        today = datetime.now().strftime("%Y-%m-%d")
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM content_store WHERE date(timestamp) = ?", (today,))
-        count = cursor.fetchone()[0]
-        conn.close()
-        await update.message.reply_text(f"📅 Today's notes: {count}")
-        
-    elif query.startswith('search'):
-        search_text = query.replace('search', '').strip()
-        if search_text:
-            conn = sqlite3.connect(DB_FILE)
-            cursor = conn.cursor()
-            cursor.execute("SELECT content, topic FROM content_store WHERE LOWER(content) LIKE ? LIMIT 5", (f'%{search_text}%',))
-            results = cursor.fetchall()
-            conn.close()
-            
-            if results:
-                msg = f"🔍 *Results for '{search_text}':*\n\n"
-                for content, topic in results:
-                    preview = content[:100] + "..." if len(content) > 100 else content
-                    msg += f"📌 {topic}\n{preview}\n\n"
-                await update.message.reply_text(msg, parse_mode="Markdown")
-            else:
-                await update.message.reply_text(f"No results found for '{search_text}'")
-        else:
-            await update.message.reply_text("Usage: /ai search [text]")
-    else:
-        await update.message.reply_text("Unknown command. Use /ai for help.")
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    help_text = """
-📚 *Bittu Study Bot Help*
-
-*📸 Save Content:*
-• Send photo → Reply with #topic
-• Send text → Reply with #topic
-
-*📊 Generate PDFs:*
-• /daily_pdf - Today's notes
-• /weekly_pdf - Last 7 days
-• /monthly_pdf - Last 30 days
-• /topic_pdf [topic] - Topic wise
-
-*🔍 Search & Stats:*
-• /search [query] - Search notes
-• /stats - Study statistics
-• /alltopics - Show all topics
-• /mydata - Show recent entries
-
-*🤖 AI Assistant:*
-• /ai topics - List topics
-• /ai count - Total notes
-• /ai today - Today's notes
-• /ai search [text] - Search
-
-*📌 Other:*
-• /start - Main menu
-• /cancel - Cancel operation
-• /clearcache - Clear PDF cache
-• /instant - Today's instant report
-
-*💡 Tips:*
-• Use #topic for organization
-• Choose from menu for quick actions
-• Cache makes PDFs faster!
-"""
-    await update.message.reply_text(help_text, parse_mode="Markdown")
-
-# ==================== BUTTON HANDLERS ====================
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-    
-    if data.startswith("topic_select_"):
-        topic = data.replace("topic_select_", "")
-        sql = "SELECT id, type, content, topic, timestamp FROM content_store WHERE LOWER(topic) LIKE ? ORDER BY timestamp ASC"
-        await generate_and_send_pdf(update, context, sql, (f"%{topic.lower()}%",),
-                                    f"Topic PDF - {topic}")
-        return
-    
-    if data == "menu_daily":
-        await daily_pdf(update, context)
-    elif data == "menu_weekly":
-        await weekly_pdf(update, context)
-    elif data == "menu_monthly":
-        await monthly_pdf(update, context)
-    elif data == "menu_topic":
-        topics = get_all_topics()
-        if topics:
-            keyboard = []
-            for topic in topics[:15]:
-                keyboard.append([InlineKeyboardButton(f"📌 {topic}", callback_data=f"topic_select_{topic}")])
-            keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="menu_back")])
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await query.message.edit_text(
-                "🏷️ *Select a topic:*",
-                parse_mode="Markdown",
-                reply_markup=reply_markup
-            )
-        else:
-            await query.message.edit_text("⚠️ No topics found. Add some data first!")
-    elif data == "menu_my_data":
-        await my_data(update, context)
-    elif data == "menu_all_topics":
-        await all_topics(update, context)
-    elif data == "menu_instant":
-        await instant_report(update, context)
-    elif data == "menu_search":
-        await query.message.edit_text(
-            "🔍 *Search Notes*\n\n"
-            "Use `/search your query`\n"
-            "Example: `/search physics`"
-        )
-    elif data == "menu_stats":
-        await stats_command(update, context)
-    elif data == "menu_clear_cache":
-        pdf_cache.clear()
-        await query.message.edit_text("🗑️ Cache cleared successfully!")
-    elif data == "menu_ai":
-        await ai_command(update, context)
-    elif data == "menu_help":
-        await help_command(update, context)
-    elif data == "menu_back":
-        await start(update, context)
-
-# ==================== MAIN ====================
-async def main():
-    if not BOT_TOKEN:
-        logger.error("BOT_TOKEN environment variable not set!")
-        return
-    
-    application = Application.builder().token(BOT_TOKEN).build()
-    
-    # Conversation handler
-    conv_handler = ConversationHandler(
-        entry_points=[
-            MessageHandler(filters.PHOTO, receive_photo),
-            MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text),
-        ],
-        states={
-            WAITING_FOR_TOPIC: [
-                MessageHandler(filters.PHOTO, receive_photo),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_topic),
-            ],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-    )
-    
-    # Add handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("daily_pdf", daily_pdf))
-    application.add_handler(CommandHandler("weekly_pdf", weekly_pdf))
-    application.add_handler(CommandHandler("monthly_pdf", monthly_pdf))
-    application.add_handler(CommandHandler("topic_pdf", topic_pdf))
-    application.add_handler(CommandHandler("clearcache", clear_cache))
-    application.add_handler(CommandHandler("alltopics", all_topics))
-    application.add_handler(CommandHandler("mydata", my_data))
-    application.add_handler(CommandHandler("instant", instant_report))
-    application.add_handler(CommandHandler("search", search_notes))
-    application.add_handler(CommandHandler("stats", stats_command))
-    application.add_handler(CommandHandler("ai", ai_command))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("cancel", cancel))
-    application.add_handler(CallbackQueryHandler(button_handler))
-    application.add_handler(conv_handler)
-    
-    # Start bot
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling(drop_pending_updates=True)
-    logger.info("🚀 Bot Started Successfully!")
-    
-    # Start Flask
-    await run_flask()
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Bot stopped.")
+    conn = sqlite3.connect(
