@@ -78,7 +78,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "📚 *Bittu Study Notes Bot*\n\n"
         "📸 **How to save notes:**\n"
-        "Send any screenshot, and reply with `#topic` when asked.\n\n"
+        "Send 1 or multiple screenshots, and reply with `#topic` when asked.\n\n"
         "📄 **Get Compiled HD PDFs:**\n"
         "• `/daily_pdf` - Today's notes\n"
         "• `/weekly_pdf` - Last 7 days\n"
@@ -89,12 +89,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def receive_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo_file_id = update.message.photo[-1].file_id
-    context.user_data['pending_photo'] = photo_file_id
     
-    await update.message.reply_text(
-        "📌 **Screenshot received!**\nPlease reply with the **#topic** (e.g., `#shiksha`, `#chemistry`):",
-        parse_mode="Markdown"
-    )
+    # Maintain a list of photos sent in a batch/album
+    if 'pending_photos' not in context.user_data:
+        context.user_data['pending_photos'] = []
+        
+    context.user_data['pending_photos'].append(photo_file_id)
+
+    # Only send prompt message once for the entire batch
+    if not context.user_data.get('asked_topic'):
+        context.user_data['asked_topic'] = True
+        await update.message.reply_text(
+            "📌 **Screenshot(s) received!**\nPlease reply with the **#topic** (e.g., `#21`, `#chemistry`):",
+            parse_mode="Markdown"
+        )
     return WAITING_FOR_TOPIC
 
 async def receive_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -102,34 +110,37 @@ async def receive_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not topic.startswith("#"):
         topic = f"#{topic}"
         
-    file_id = context.user_data.get('pending_photo')
-    if not file_id:
-        await update.message.reply_text("❌ Session expired. Please resend the photo.")
+    file_ids = context.user_data.get('pending_photos', [])
+    if not file_ids:
+        await update.message.reply_text("❌ Session expired. Please resend the photo(s).")
         return ConversationHandler.END
 
-    status_msg = await update.message.reply_text("💾 Saving screenshot...")
+    status_msg = await update.message.reply_text(f"💾 Saving {len(file_ids)} screenshot(s)...")
 
-    # Save to SQLite Database
+    # Save all accumulated images to Database
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute("INSERT INTO screenshots (file_id, topic) VALUES (?, ?)", (file_id, topic))
+    for f_id in file_ids:
+        cursor.execute("INSERT INTO screenshots (file_id, topic) VALUES (?, ?)", (f_id, topic))
+        if CHANNEL_ID:
+            try:
+                caption = f"📝 **Topic:** {topic}\n📅 {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+                await context.bot.send_photo(chat_id=CHANNEL_ID, photo=f_id, caption=caption, parse_mode="Markdown")
+            except Exception as e:
+                logger.error(f"Failed to post to channel: {e}")
     conn.commit()
     conn.close()
 
-    # Forward to Channel
-    if CHANNEL_ID:
-        try:
-            caption = f"📝 **Topic:** {topic}\n📅 {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-            await context.bot.send_photo(chat_id=CHANNEL_ID, photo=file_id, caption=caption, parse_mode="Markdown")
-        except Exception as e:
-            logger.error(f"Failed to post to channel: {e}")
-
-    await status_msg.edit_text(f"✅ **Saved under {topic}!**", parse_mode="Markdown")
-    context.user_data.pop('pending_photo', None)
+    await status_msg.edit_text(f"✅ **Saved {len(file_ids)} screenshot(s) under {topic}!**", parse_mode="Markdown")
+    
+    # Reset context state
+    context.user_data.pop('pending_photos', None)
+    context.user_data.pop('asked_topic', None)
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.pop('pending_photo', None)
+    context.user_data.pop('pending_photos', None)
+    context.user_data.pop('asked_topic', None)
     await update.message.reply_text("Action canceled.")
     return ConversationHandler.END
 
@@ -152,7 +163,6 @@ async def generate_and_send_pdf(update: Update, context: ContextTypes.DEFAULT_TY
     c = canvas.Canvas(pdf_buffer, pagesize=A4)
     page_w, page_h = A4
 
-    # --- SCREENSHOT PAGES (1 Page Per Screenshot) ---
     total_count = len(records)
     
     for idx, record in enumerate(records, start=1):
@@ -231,7 +241,7 @@ async def monthly_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def topic_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("⚠️ Specify topic! Example: `/topic_pdf shiksa`", parse_mode="Markdown")
+        await update.message.reply_text("⚠️ Specify topic! Example: `/topic_pdf 21`", parse_mode="Markdown")
         return
     
     user_topic = context.args[0].strip().replace("#", "")
@@ -246,7 +256,10 @@ async def main():
     conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.PHOTO, receive_photo)],
         states={
-            WAITING_FOR_TOPIC: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_topic)],
+            WAITING_FOR_TOPIC: [
+                MessageHandler(filters.PHOTO, receive_photo),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_topic)
+            ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
