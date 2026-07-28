@@ -17,7 +17,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
 from reportlab.lib.utils import ImageReader
 
-from flask import Flask, render_template, jsonify
+from flask import Flask, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -27,19 +27,6 @@ from telegram.ext import (
     ConversationHandler,
     ContextTypes,
     filters,
-)
-
-# Import features
-from features import (
-    config as feature_config,
-    analytics,
-    ai_assistant,
-    export_import,
-    search,
-    reminders,
-    flashcards,
-    spaced_repetition,
-    web_dashboard,
 )
 
 # ==================== CONFIGURATION ====================
@@ -55,8 +42,6 @@ PORT = int(os.environ.get("PORT", 10000))
 
 # Conversation States
 WAITING_FOR_TOPIC = 1
-WAITING_FOR_CUSTOM_TOPIC = 2
-WAITING_FOR_TOPIC_NAME = 3
 
 DB_FILE = "study_data.db"
 CACHE_EXPIRY = 3600
@@ -76,15 +61,11 @@ def init_db():
             type TEXT NOT NULL,
             content TEXT NOT NULL,
             topic TEXT NOT NULL,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            review_date DATE,
-            priority INTEGER DEFAULT 0,
-            tags TEXT
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_topic ON content_store(topic)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON content_store(timestamp)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_review ON content_store(review_date)")
     conn.commit()
     conn.close()
 
@@ -112,12 +93,10 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return render_template('dashboard.html' if os.path.exists('templates/dashboard.html') else 
-                          '<h1>Bittu Study Bot is Live!</h1>')
+    return "Bittu Study Bot is Live!"
 
 @app.route('/api/stats')
 def api_stats():
-    """API endpoint for analytics"""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     
@@ -135,24 +114,13 @@ def api_stats():
     cursor.execute("SELECT COUNT(*) FROM content_store WHERE date(timestamp) >= ?", (week_ago,))
     week_count = cursor.fetchone()[0]
     
-    cursor.execute("""
-        SELECT date(timestamp) as day, COUNT(*) as count 
-        FROM content_store 
-        WHERE date(timestamp) >= date('now', '-30 days')
-        GROUP BY day 
-        ORDER BY day
-    """)
-    activity = cursor.fetchall()
-    
     conn.close()
     
     return jsonify({
         'total': total,
         'topics': topics,
         'today': today_count,
-        'week': week_count,
-        'days': [row[0][5:] for row in activity],
-        'counts': [row[1] for row in activity]
+        'week': week_count
     })
 
 async def run_flask():
@@ -161,24 +129,16 @@ async def run_flask():
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, server.serve_forever)
 
-# ==================== OPTIMIZED IMAGE HANDLING ====================
+# ==================== IMAGE HANDLING ====================
 async def fetch_image_optimized(bot, file_id, idx):
     try:
         tg_file = await bot.get_file(file_id)
-        if tg_file.file_size and tg_file.file_size > 5 * 1024 * 1024:
-            file_bytes = await tg_file.download_as_bytearray()
-            img = Image.open(BytesIO(file_bytes)).convert("RGB")
-            img.thumbnail((800, 800), Image.Resampling.LANCZOS)
-            temp_path = f"temp_{idx}_{int(time.time())}.jpg"
-            img.save(temp_path, "JPEG", quality=75, optimize=True)
-            return idx, temp_path
-        else:
-            file_bytes = await tg_file.download_as_bytearray()
-            img = Image.open(BytesIO(file_bytes)).convert("RGB")
-            img.thumbnail((1200, 1600), Image.Resampling.LANCZOS)
-            temp_path = f"temp_{idx}_{int(time.time())}.jpg"
-            img.save(temp_path, "JPEG", quality=85, optimize=True)
-            return idx, temp_path
+        file_bytes = await tg_file.download_as_bytearray()
+        img = Image.open(BytesIO(file_bytes)).convert("RGB")
+        img.thumbnail((1200, 1600), Image.Resampling.LANCZOS)
+        temp_path = f"temp_{idx}_{int(time.time())}.jpg"
+        img.save(temp_path, "JPEG", quality=85, optimize=True)
+        return idx, temp_path
     except Exception as e:
         logger.error(f"Error downloading photo {file_id}: {e}")
         return idx, None
@@ -345,46 +305,6 @@ async def generate_and_send_pdf(update: Update, context: ContextTypes.DEFAULT_TY
     )
     await status_msg.delete()
 
-# ==================== FEATURE MANAGER ====================
-class FeatureManager:
-    def __init__(self):
-        self.features = {}
-        self.handlers = []
-        self.callback_handlers = {}
-    
-    def register_feature(self, name, feature_module):
-        self.features[name] = feature_module
-        if hasattr(feature_module, 'get_handlers'):
-            self.handlers.extend(feature_module.get_handlers())
-        if hasattr(feature_module, 'get_callback_handlers'):
-            self.callback_handlers.update(feature_module.get_callback_handlers())
-    
-    def get_all_handlers(self):
-        return self.handlers
-    
-    def get_callback_handler(self, callback_data):
-        return self.callback_handlers.get(callback_data)
-
-feature_manager = FeatureManager()
-
-# Register features based on config
-if feature_config.ENABLE_ANALYTICS:
-    feature_manager.register_feature('analytics', analytics)
-if feature_config.ENABLE_AI:
-    feature_manager.register_feature('ai_assistant', ai_assistant)
-if feature_config.ENABLE_EXPORT:
-    feature_manager.register_feature('export_import', export_import)
-if feature_config.ENABLE_SEARCH:
-    feature_manager.register_feature('search', search)
-if feature_config.ENABLE_REMINDERS:
-    feature_manager.register_feature('reminders', reminders)
-if feature_config.ENABLE_FLASHCARDS:
-    feature_manager.register_feature('flashcards', flashcards)
-if feature_config.ENABLE_SPACED_REPETITION:
-    feature_manager.register_feature('spaced_repetition', spaced_repetition)
-if feature_config.ENABLE_WEB_DASHBOARD:
-    feature_manager.register_feature('web_dashboard', web_dashboard)
-
 # ==================== BOT HANDLERS ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
@@ -392,38 +312,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
          InlineKeyboardButton("📊 Weekly PDF", callback_data="menu_weekly")],
         [InlineKeyboardButton("📈 Monthly PDF", callback_data="menu_monthly"),
          InlineKeyboardButton("🏷️ Topic PDF", callback_data="menu_topic")],
-    ]
-    
-    if feature_config.ENABLE_ANALYTICS:
-        keyboard.append([InlineKeyboardButton("📊 Analytics", callback_data="menu_analytics")])
-    if feature_config.ENABLE_AI:
-        keyboard.append([InlineKeyboardButton("🤖 AI Assistant", callback_data="menu_ai")])
-    if feature_config.ENABLE_EXPORT:
-        keyboard.append([InlineKeyboardButton("📤 Export", callback_data="menu_export")])
-    if feature_config.ENABLE_SEARCH:
-        keyboard.append([InlineKeyboardButton("🔍 Search", callback_data="menu_search")])
-    if feature_config.ENABLE_REMINDERS:
-        keyboard.append([InlineKeyboardButton("⏰ Reminders", callback_data="menu_reminder")])
-    if feature_config.ENABLE_FLASHCARDS:
-        keyboard.append([InlineKeyboardButton("🃏 Flashcards", callback_data="menu_flashcard")])
-    if feature_config.ENABLE_SPACED_REPETITION:
-        keyboard.append([InlineKeyboardButton("🔄 Review", callback_data="menu_review")])
-    
-    keyboard.extend([
         [InlineKeyboardButton("📁 My Data", callback_data="menu_my_data"),
          InlineKeyboardButton("📋 All Topics", callback_data="menu_all_topics")],
         [InlineKeyboardButton("⚡ Instant Report", callback_data="menu_instant"),
          InlineKeyboardButton("🗑️ Clear Cache", callback_data="menu_clear_cache")],
         [InlineKeyboardButton("❓ Help", callback_data="menu_help")]
-    ])
+    ]
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     msg = (
         "📚 *Bittu Study Notes Bot*\n\n"
         "📸 **Save Content:**\n"
-        "Send screenshots, text, or PDFs, then reply with `#topic`.\n\n"
-        f"⚡ **Features Active:** {len(feature_manager.features)}\n"
+        "Send screenshots or text, then reply with `#topic`.\n\n"
+        "📊 **Generate PDFs:**\n"
+        "Use the buttons below or commands:\n"
+        "/daily_pdf, /weekly_pdf, /monthly_pdf, /topic_pdf\n\n"
         "👇 *Use the menu below:*"
     )
     
@@ -461,26 +365,6 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['asked_topic'] = True
         await update.message.reply_text(
             "📝 **Text received!**\nReply with **#topic** (e.g., `#chemistry`):",
-            parse_mode="Markdown"
-        )
-    return WAITING_FOR_TOPIC
-
-async def receive_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    document = update.message.document
-    if document.mime_type != 'application/pdf':
-        await update.message.reply_text("⚠️ Please send a PDF file only.")
-        return
-    
-    file_id = document.file_id
-    if 'pending_items' not in context.user_data:
-        context.user_data['pending_items'] = []
-    
-    context.user_data['pending_items'].append(('text', f"[PDF: {document.file_name}]"))
-    
-    if not context.user_data.get('asked_topic'):
-        context.user_data['asked_topic'] = True
-        await update.message.reply_text(
-            "📄 **PDF received!**\nReply with **#topic** (e.g., `#chemistry`):",
             parse_mode="Markdown"
         )
     return WAITING_FOR_TOPIC
@@ -642,7 +526,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 *📸 Save Content:*
 • Send photo → Reply with #topic
 • Send text → Reply with #topic
-• Send PDF → Reply with #topic
 
 *📊 Generate PDFs:*
 • /daily_pdf - Today's notes
@@ -650,18 +533,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • /monthly_pdf - Last 30 days
 • /topic_pdf [topic] - Topic wise
 
-*⚡ Features:*
-• /stats - Study analytics
-• /search [query] - Search notes
-• /export - Export data
-• /flashcards [topic] - Generate flashcards
-• /review - Due review items
-• /ai [question] - AI assistant
-• /clearcache - Clear cache
-
 *📌 Commands:*
 • /start - Main menu
 • /cancel - Cancel operation
+• /clearcache - Clear PDF cache
+• /alltopics - Show all topics
+• /mydata - Show recent entries
+• /instant - Today's instant report
 
 *💡 Tips:*
 • Use #topic for organization
@@ -676,55 +554,32 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
     
-    # Check if it's a feature callback
-    if data.startswith("feature_"):
-        handler = feature_manager.get_callback_handler(data)
-        if handler:
-            await handler(update, context)
-        return
-    
-    # Handle menu items
-    if data.startswith("menu_"):
-        menu_item = data.replace("menu_", "")
-        
-        if menu_item == "daily":
-            await daily_pdf(update, context)
-        elif menu_item == "weekly":
-            await weekly_pdf(update, context)
-        elif menu_item == "monthly":
-            await monthly_pdf(update, context)
-        elif menu_item == "topic":
-            await topic_pdf(update, context)
-        elif menu_item == "analytics" and feature_config.ENABLE_ANALYTICS:
-            await analytics.show_analytics(update, context)
-        elif menu_item == "ai" and feature_config.ENABLE_AI:
-            await ai_assistant.ai_assistant(update, context)
-        elif menu_item == "export" and feature_config.ENABLE_EXPORT:
-            await export_import.export_data(update, context)
-        elif menu_item == "search" and feature_config.ENABLE_SEARCH:
-            await search.search_notes(update, context)
-        elif menu_item == "reminder" and feature_config.ENABLE_REMINDERS:
-            await reminders.reminder_menu(update, context)
-        elif menu_item == "flashcard" and feature_config.ENABLE_FLASHCARDS:
-            await flashcards.flashcard_menu(update, context)
-        elif menu_item == "review" and feature_config.ENABLE_SPACED_REPETITION:
-            await spaced_repetition.review_menu(update, context)
-        elif menu_item == "my_data":
-            await my_data(update, context)
-        elif menu_item == "all_topics":
-            await all_topics(update, context)
-        elif menu_item == "instant":
-            await instant_report(update, context)
-        elif menu_item == "clear_cache":
-            pdf_cache.clear()
-            await query.message.edit_text("🗑️ Cache cleared successfully!")
-        elif menu_item == "help":
-            await help_command(update, context)
-        elif menu_item == "back":
-            await start(update, context)
+    if data == "menu_daily":
+        await daily_pdf(update, context)
+    elif data == "menu_weekly":
+        await weekly_pdf(update, context)
+    elif data == "menu_monthly":
+        await monthly_pdf(update, context)
+    elif data == "menu_topic":
+        await topic_pdf(update, context)
+    elif data == "menu_my_data":
+        await my_data(update, context)
+    elif data == "menu_all_topics":
+        await all_topics(update, context)
+    elif data == "menu_instant":
+        await instant_report(update, context)
+    elif data == "menu_clear_cache":
+        pdf_cache.clear()
+        await query.message.edit_text("🗑️ Cache cleared successfully!")
+    elif data == "menu_help":
+        await help_command(update, context)
 
 # ==================== MAIN ====================
 async def main():
+    if not BOT_TOKEN:
+        logger.error("BOT_TOKEN environment variable not set!")
+        return
+    
     application = Application.builder().token(BOT_TOKEN).build()
     
     # Conversation handler
@@ -732,13 +587,11 @@ async def main():
         entry_points=[
             MessageHandler(filters.PHOTO, receive_photo),
             MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text),
-            MessageHandler(filters.Document.PDF, receive_pdf),
         ],
         states={
             WAITING_FOR_TOPIC: [
                 MessageHandler(filters.PHOTO, receive_photo),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_topic),
-                MessageHandler(filters.Document.PDF, receive_pdf),
             ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
@@ -757,10 +610,6 @@ async def main():
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("cancel", cancel))
     
-    # Feature handlers
-    for handler in feature_manager.get_all_handlers():
-        application.add_handler(handler)
-    
     # Callback handler
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(conv_handler)
@@ -769,7 +618,7 @@ async def main():
     await application.initialize()
     await application.start()
     await application.updater.start_polling(drop_pending_updates=True)
-    logger.info("Telegram Bot Started!")
+    logger.info("Telegram Bot Started Successfully!")
     
     # Start Flask
     await run_flask()
