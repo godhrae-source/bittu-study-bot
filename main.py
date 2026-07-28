@@ -9,13 +9,14 @@ from io import BytesIO
 from PIL import Image
 from concurrent.futures import ThreadPoolExecutor
 
-from reportlab.lib.pagesizes import A4
+from reportlab.lib.pagesizes import A4, landscape
 from reportlab.pdfgen import canvas
 from reportlab.lib import colors
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Image as RLImage
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Image as RLImage, PageBreak
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
 from reportlab.lib.utils import ImageReader
+from reportlab.lib.units import mm
 
 from flask import Flask, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -42,6 +43,7 @@ PORT = int(os.environ.get("PORT", 10000))
 
 # Conversation States
 WAITING_FOR_TOPIC = 1
+WAITING_FOR_SEARCH = 2
 
 DB_FILE = "study_data.db"
 CACHE_EXPIRY = 3600
@@ -135,28 +137,41 @@ async def fetch_image_optimized(bot, file_id, idx):
         tg_file = await bot.get_file(file_id)
         file_bytes = await tg_file.download_as_bytearray()
         img = Image.open(BytesIO(file_bytes)).convert("RGB")
-        img.thumbnail((1200, 1600), Image.Resampling.LANCZOS)
+        
+        # Smart resize for better quality
+        max_size = 1500
+        if max(img.size) > max_size:
+            img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+        
         temp_path = f"temp_{idx}_{int(time.time())}.jpg"
-        img.save(temp_path, "JPEG", quality=85, optimize=True)
+        img.save(temp_path, "JPEG", quality=90, optimize=True)
         return idx, temp_path
     except Exception as e:
         logger.error(f"Error downloading photo {file_id}: {e}")
         return idx, None
 
-# ==================== PDF GENERATOR ====================
-def generate_pdf_sync(records, downloaded_images, title, page_num=1):
+# ==================== PDF GENERATOR - FULL PAGE FIX ====================
+def generate_pdf_sync(records, downloaded_images, title):
+    """Generate PDF with full A4 size - both vertical and horizontal support"""
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.pdfgen import canvas
+    from reportlab.lib import colors
+    
     pdf_buffer = BytesIO()
     
-    doc = SimpleDocTemplate(pdf_buffer, pagesize=A4, 
-                           leftMargin=30, rightMargin=30,
-                           topMargin=50, bottomMargin=30)
+    # Create PDF with A4 size
+    doc = SimpleDocTemplate(pdf_buffer, pagesize=A4,
+                           leftMargin=20, rightMargin=20,
+                           topMargin=40, bottomMargin=40)
+    
     story = []
     styles = getSampleStyleSheet()
     
+    # Custom styles
     header_style = ParagraphStyle(
         'CustomHeader',
         parent=styles['Heading1'],
-        fontSize=14,
+        fontSize=16,
         textColor=colors.HexColor('#2C3E50'),
         alignment=TA_CENTER,
         spaceAfter=20
@@ -165,74 +180,111 @@ def generate_pdf_sync(records, downloaded_images, title, page_num=1):
     topic_style = ParagraphStyle(
         'TopicStyle',
         parent=styles['Normal'],
-        fontSize=11,
+        fontSize=12,
         textColor=colors.HexColor('#34495E'),
         leftIndent=10,
-        spaceAfter=10,
-        backColor=colors.HexColor('#ECF0F1')
+        spaceAfter=8,
+        backColor=colors.HexColor('#ECF0F1'),
+        borderPadding=5
     )
     
     text_style = ParagraphStyle(
         'TextStyle',
         parent=styles['Normal'],
-        fontSize=10,
-        spaceAfter=8,
+        fontSize=11,
+        spaceAfter=6,
         leftIndent=10,
-        rightIndent=10
+        rightIndent=10,
+        leading=16
     )
     
+    # Add header
     story.append(Paragraph(f"📚 {title}", header_style))
     story.append(Paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}", 
                           styles['Italic']))
-    story.append(Spacer(1, 20))
+    story.append(Spacer(1, 15))
     
     for idx, rec in enumerate(records):
+        # Topic header
         topic_text = f"<b>Topic:</b> {rec['topic']} | <b>Date:</b> {rec['timestamp'][:16]}"
         story.append(Paragraph(topic_text, topic_style))
+        story.append(Spacer(1, 5))
         
         if rec['type'] == 'photo' and idx in downloaded_images:
             img_path = downloaded_images[idx]
             try:
-                img = ImageReader(img_path)
-                img_width, img_height = img.getSize()
+                # Get image dimensions
+                img = Image.open(img_path)
+                img_width, img_height = img.size
                 
-                max_width = 500
-                max_height = 400
+                # Calculate available space
+                page_width = A4[0] - 40  # 40mm margins
+                page_height = A4[1] - 100  # 100mm for header/footer
                 
-                aspect = img_width / float(img_height)
-                if max_width / max_height < aspect:
-                    width = max_width
-                    height = max_width / aspect
+                # Check if image is landscape or portrait
+                is_landscape = img_width > img_height
+                
+                if is_landscape:
+                    # Landscape image - use full width
+                    width = page_width
+                    height = (img_height * page_width) / img_width
+                    
+                    # If too tall, fit to page height
+                    if height > page_height:
+                        height = page_height
+                        width = (img_width * page_height) / img_height
                 else:
-                    height = max_height
-                    width = max_height * aspect
+                    # Portrait image - fit to page
+                    height = page_height
+                    width = (img_width * page_height) / img_height
+                    
+                    # If too wide, fit to page width
+                    if width > page_width:
+                        width = page_width
+                        height = (img_height * page_width) / img_width
                 
+                # Ensure minimum size
+                if width < 100 or height < 100:
+                    width = min(page_width, 400)
+                    height = min(page_height, 400)
+                
+                # Add image with proper sizing
                 story.append(Spacer(1, 10))
                 story.append(RLImage(img_path, width=width, height=height))
                 story.append(Spacer(1, 10))
+                
             except Exception as e:
                 logger.error(f"Error adding image {idx}: {e}")
                 story.append(Paragraph("⚠️ Image could not be loaded", text_style))
             
         elif rec['type'] == 'text':
+            # Format text content
             text_content = safe_str(rec['content'])
+            # Split into paragraphs
             paragraphs = text_content.split('\n')
             for para in paragraphs:
                 if para.strip():
-                    story.append(Paragraph(para, text_style))
-                    story.append(Spacer(1, 5))
+                    # Wrap long text
+                    wrapped_para = para
+                    if len(para) > 100:
+                        wrapped_para = para[:100] + "..."
+                    story.append(Paragraph(wrapped_para, text_style))
+                    story.append(Spacer(1, 3))
         
-        story.append(Spacer(1, 15))
+        story.append(Spacer(1, 10))
         story.append(Paragraph("<hr/>", styles['Normal']))
         story.append(Spacer(1, 10))
     
+    # Add footer
     story.append(Spacer(1, 20))
-    story.append(Paragraph(f"<i>Page {page_num} - Generated by Bittu Study Bot</i>", 
+    story.append(Paragraph(f"<i>Generated by Bittu Study Bot - {len(records)} entries</i>", 
                           styles['Italic']))
     
+    # Build PDF
     doc.build(story)
     pdf_buffer.seek(0)
     
+    # Cleanup temp files
     for path in downloaded_images.values():
         if path and os.path.exists(path):
             try:
@@ -273,6 +325,7 @@ async def generate_and_send_pdf(update: Update, context: ContextTypes.DEFAULT_TY
         await status_msg.edit_text("⚠️ No records found for this selection.")
         return
 
+    # Download images in parallel
     photo_records = [(idx, r) for idx, r in enumerate(records) if r['type'] == 'photo']
     download_tasks = []
     for idx, rec in photo_records:
@@ -283,14 +336,14 @@ async def generate_and_send_pdf(update: Update, context: ContextTypes.DEFAULT_TY
         results = await asyncio.gather(*download_tasks)
         downloaded_images = {idx: path for idx, path in results if path}
 
+    # Generate PDF in background thread
     loop = asyncio.get_event_loop()
     pdf_buffer = await loop.run_in_executor(
         executor,
         generate_pdf_sync,
         records,
         downloaded_images,
-        title,
-        1
+        title
     )
 
     pdf_data = pdf_buffer.getvalue()
@@ -315,8 +368,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📁 My Data", callback_data="menu_my_data"),
          InlineKeyboardButton("📋 All Topics", callback_data="menu_all_topics")],
         [InlineKeyboardButton("⚡ Instant Report", callback_data="menu_instant"),
+         InlineKeyboardButton("🔍 Search", callback_data="menu_search")],
+        [InlineKeyboardButton("📊 Stats", callback_data="menu_stats"),
          InlineKeyboardButton("🗑️ Clear Cache", callback_data="menu_clear_cache")],
-        [InlineKeyboardButton("❓ Help", callback_data="menu_help")]
+        [InlineKeyboardButton("🤖 AI Help", callback_data="menu_ai"),
+         InlineKeyboardButton("❓ Help", callback_data="menu_help")]
     ]
     
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -454,16 +510,20 @@ async def topic_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         topics = get_all_topics()
         if topics:
-            msg = "🏷️ *Available Topics:*\n\n"
-            for topic in topics[:10]:
-                msg += f"• `{topic}`\n"
-            if len(topics) > 10:
-                msg += f"\n... and {len(topics) - 10} more"
-            await update.message.reply_text(msg + "\n\nUsage: `/topic_pdf topic_name`",
-                                          parse_mode="Markdown")
+            # Show topics with inline buttons
+            keyboard = []
+            for topic in topics[:15]:  # Show first 15 topics
+                keyboard.append([InlineKeyboardButton(f"📌 {topic}", callback_data=f"topic_select_{topic}")])
+            keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="menu_back")])
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await update.message.reply_text(
+                "🏷️ *Select a topic:*\n\nOr use `/topic_pdf topic_name`",
+                parse_mode="Markdown",
+                reply_markup=reply_markup
+            )
         else:
-            await update.message.reply_text("⚠️ No topics found. Usage: `/topic_pdf topic_name`",
-                                          parse_mode="Markdown")
+            await update.message.reply_text("⚠️ No topics found. Add some data first!")
         return
     
     user_topic = context.args[0].strip().replace("#", "")
@@ -519,6 +579,158 @@ async def instant_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sql = "SELECT id, type, content, topic, timestamp FROM content_store WHERE timestamp LIKE ? ORDER BY timestamp ASC"
     await generate_and_send_pdf(update, context, sql, (today,), "📊 Instant Report - Today")
 
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT COUNT(*) FROM content_store")
+    total = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT COUNT(DISTINCT topic) FROM content_store")
+    topics = cursor.fetchone()[0]
+    
+    today = datetime.now().strftime("%Y-%m-%d")
+    cursor.execute("SELECT COUNT(*) FROM content_store WHERE date(timestamp) = ?", (today,))
+    today_count = cursor.fetchone()[0]
+    
+    week_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+    cursor.execute("SELECT COUNT(*) FROM content_store WHERE date(timestamp) >= ?", (week_ago,))
+    week_count = cursor.fetchone()[0]
+    
+    cursor.execute("""
+        SELECT topic, COUNT(*) as count 
+        FROM content_store 
+        GROUP BY topic 
+        ORDER BY count DESC 
+        LIMIT 5
+    """)
+    top_topics = cursor.fetchall()
+    
+    conn.close()
+    
+    msg = f"📊 *Study Statistics*\n\n"
+    msg += f"📚 Total Notes: {total}\n"
+    msg += f"🏷️ Topics: {topics}\n"
+    msg += f"📅 Today: {today_count} entries\n"
+    msg += f"📆 This Week: {week_count} entries\n\n"
+    
+    if top_topics:
+        msg += "*Top Topics:*\n"
+        for topic, count in top_topics:
+            bar = "▰" * min(count, 10) + "▱" * max(0, 10 - min(count, 10))
+            msg += f"• {topic}: {bar} {count}\n"
+    
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+async def search_notes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text(
+            "🔍 *Search Notes*\n\n"
+            "Usage: `/search your query`\n"
+            "Example: `/search physics`\n"
+            "Or: `/search topic:chemistry`"
+        )
+        return
+    
+    query = ' '.join(context.args).lower()
+    
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    
+    if 'topic:' in query:
+        topic = query.split('topic:')[1].strip()
+        cursor.execute("SELECT content, topic, timestamp FROM content_store WHERE LOWER(topic) LIKE ? LIMIT 10", (f'%{topic}%',))
+    else:
+        cursor.execute("SELECT content, topic, timestamp FROM content_store WHERE LOWER(content) LIKE ? OR LOWER(topic) LIKE ? LIMIT 10", (f'%{query}%', f'%{query}%'))
+    
+    results = cursor.fetchall()
+    conn.close()
+    
+    if not results:
+        await update.message.reply_text(f"❌ No results found for '{query}'")
+        return
+    
+    msg = f"🔍 *Results ({len(results)}) for '{query}':*\n\n"
+    for content, topic, timestamp in results[:5]:
+        preview = content[:150] + "..." if len(content) > 150 else content
+        msg += f"📌 *{topic}* ({timestamp[:16]})\n{preview}\n\n"
+    
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+async def ai_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    help_text = """
+🤖 *AI Assistant Help*
+
+*Commands:*
+• /ai topics - List all topics
+• /ai count - Total notes count
+• /ai today - Today's notes count
+• /ai search [text] - Search notes
+
+*Examples:*
+• /ai topics
+• /ai count
+• /ai today
+• /ai search chemistry
+"""
+    await update.message.reply_text(help_text, parse_mode="Markdown")
+
+async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await ai_help(update, context)
+        return
+    
+    query = ' '.join(context.args).lower()
+    
+    if query == 'topics':
+        topics = get_all_topics()
+        if topics:
+            msg = "📋 *All Topics:*\n\n"
+            for topic in topics:
+                msg += f"• {topic}\n"
+            await update.message.reply_text(msg, parse_mode="Markdown")
+        else:
+            await update.message.reply_text("No topics found.")
+        
+    elif query == 'count':
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM content_store")
+        count = cursor.fetchone()[0]
+        conn.close()
+        await update.message.reply_text(f"📚 Total notes: {count}")
+        
+    elif query == 'today':
+        today = datetime.now().strftime("%Y-%m-%d")
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM content_store WHERE date(timestamp) = ?", (today,))
+        count = cursor.fetchone()[0]
+        conn.close()
+        await update.message.reply_text(f"📅 Today's notes: {count}")
+        
+    elif query.startswith('search'):
+        search_text = query.replace('search', '').strip()
+        if search_text:
+            conn = sqlite3.connect(DB_FILE)
+            cursor = conn.cursor()
+            cursor.execute("SELECT content, topic FROM content_store WHERE LOWER(content) LIKE ? LIMIT 5", (f'%{search_text}%',))
+            results = cursor.fetchall()
+            conn.close()
+            
+            if results:
+                msg = f"🔍 *Results for '{search_text}':*\n\n"
+                for content, topic in results:
+                    preview = content[:100] + "..." if len(content) > 100 else content
+                    msg += f"📌 {topic}\n{preview}\n\n"
+                await update.message.reply_text(msg, parse_mode="Markdown")
+            else:
+                await update.message.reply_text(f"No results found for '{search_text}'")
+        else:
+            await update.message.reply_text("Usage: /ai search [text]")
+    else:
+        await ai_help(update, context)
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = """
 📚 *Bittu Study Bot Help*
@@ -533,12 +745,22 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • /monthly_pdf - Last 30 days
 • /topic_pdf [topic] - Topic wise
 
-*📌 Commands:*
+*🔍 Search & Stats:*
+• /search [query] - Search notes
+• /stats - Study statistics
+• /alltopics - Show all topics
+• /mydata - Show recent entries
+
+*🤖 AI Assistant:*
+• /ai topics - List topics
+• /ai count - Total notes
+• /ai today - Today's notes
+• /ai search [text] - Search
+
+*📌 Other:*
 • /start - Main menu
 • /cancel - Cancel operation
 • /clearcache - Clear PDF cache
-• /alltopics - Show all topics
-• /mydata - Show recent entries
 • /instant - Today's instant report
 
 *💡 Tips:*
@@ -554,6 +776,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
     
+    # Handle topic selection from button
+    if data.startswith("topic_select_"):
+        topic = data.replace("topic_select_", "")
+        sql = "SELECT id, type, content, topic, timestamp FROM content_store WHERE LOWER(topic) LIKE ? ORDER BY timestamp ASC"
+        await generate_and_send_pdf(update, context, sql, (f"%{topic.lower()}%",),
+                                    f"Topic PDF - {topic}")
+        return
+    
     if data == "menu_daily":
         await daily_pdf(update, context)
     elif data == "menu_weekly":
@@ -561,18 +791,44 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "menu_monthly":
         await monthly_pdf(update, context)
     elif data == "menu_topic":
-        await topic_pdf(update, context)
+        # Show topic selection
+        topics = get_all_topics()
+        if topics:
+            keyboard = []
+            for topic in topics[:15]:
+                keyboard.append([InlineKeyboardButton(f"📌 {topic}", callback_data=f"topic_select_{topic}")])
+            keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="menu_back")])
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.message.edit_text(
+                "🏷️ *Select a topic:*",
+                parse_mode="Markdown",
+                reply_markup=reply_markup
+            )
+        else:
+            await query.message.edit_text("⚠️ No topics found. Add some data first!")
     elif data == "menu_my_data":
         await my_data(update, context)
     elif data == "menu_all_topics":
         await all_topics(update, context)
     elif data == "menu_instant":
         await instant_report(update, context)
+    elif data == "menu_search":
+        await query.message.edit_text(
+            "🔍 *Search Notes*\n\n"
+            "Use `/search your query`\n"
+            "Example: `/search physics`"
+        )
+    elif data == "menu_stats":
+        await stats_command(update, context)
     elif data == "menu_clear_cache":
         pdf_cache.clear()
         await query.message.edit_text("🗑️ Cache cleared successfully!")
+    elif data == "menu_ai":
+        await ai_help(update, context)
     elif data == "menu_help":
         await help_command(update, context)
+    elif data == "menu_back":
+        await start(update, context)
 
 # ==================== MAIN ====================
 async def main():
@@ -607,6 +863,9 @@ async def main():
     application.add_handler(CommandHandler("alltopics", all_topics))
     application.add_handler(CommandHandler("mydata", my_data))
     application.add_handler(CommandHandler("instant", instant_report))
+    application.add_handler(CommandHandler("search", search_notes))
+    application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(CommandHandler("ai", ai_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("cancel", cancel))
     
