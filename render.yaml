@@ -8,4 +8,6 @@ services:
       - key: BOT_TOKEN
         sync: false
       - key: CHANNEL_ID
-        sync: falsew
+        sync: false
+      - key: PORT
+        value: 10000
