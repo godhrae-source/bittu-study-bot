@@ -9,14 +9,13 @@ from io import BytesIO
 from PIL import Image
 from concurrent.futures import ThreadPoolExecutor
 
-from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib import colors
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Image as RLImage, PageBreak
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Image as RLImage
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
 from reportlab.lib.utils import ImageReader
-from reportlab.lib.units import mm
 
 from flask import Flask, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -43,7 +42,6 @@ PORT = int(os.environ.get("PORT", 10000))
 
 # Conversation States
 WAITING_FOR_TOPIC = 1
-WAITING_FOR_SEARCH = 2
 
 DB_FILE = "study_data.db"
 CACHE_EXPIRY = 3600
@@ -131,81 +129,74 @@ async def run_flask():
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, server.serve_forever)
 
-# ==================== IMAGE HANDLING ====================
-async def fetch_image_optimized(bot, file_id, idx):
+# ==================== FAST IMAGE HANDLING ====================
+async def fetch_image_fast(bot, file_id, idx):
+    """Faster image download with compression"""
     try:
         tg_file = await bot.get_file(file_id)
         file_bytes = await tg_file.download_as_bytearray()
         img = Image.open(BytesIO(file_bytes)).convert("RGB")
         
-        # Smart resize for better quality
-        max_size = 1500
-        if max(img.size) > max_size:
-            img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+        # Quick resize for speed
+        if max(img.size) > 1200:
+            img.thumbnail((1200, 1200), Image.Resampling.LANCZOS)
         
         temp_path = f"temp_{idx}_{int(time.time())}.jpg"
-        img.save(temp_path, "JPEG", quality=90, optimize=True)
+        img.save(temp_path, "JPEG", quality=85, optimize=True)
         return idx, temp_path
     except Exception as e:
         logger.error(f"Error downloading photo {file_id}: {e}")
         return idx, None
 
-# ==================== PDF GENERATOR - FULL PAGE FIX ====================
-def generate_pdf_sync(records, downloaded_images, title):
-    """Generate PDF with full A4 size - both vertical and horizontal support"""
-    from reportlab.lib.pagesizes import A4, landscape
-    from reportlab.pdfgen import canvas
-    from reportlab.lib import colors
-    
+# ==================== FAST PDF GENERATOR ====================
+def generate_pdf_fast(records, downloaded_images, title):
+    """Generate PDF quickly with good quality"""
     pdf_buffer = BytesIO()
     
-    # Create PDF with A4 size
     doc = SimpleDocTemplate(pdf_buffer, pagesize=A4,
-                           leftMargin=20, rightMargin=20,
-                           topMargin=40, bottomMargin=40)
+                           leftMargin=30, rightMargin=30,
+                           topMargin=50, bottomMargin=50)
     
     story = []
     styles = getSampleStyleSheet()
     
-    # Custom styles
+    # Simple styles for speed
     header_style = ParagraphStyle(
         'CustomHeader',
         parent=styles['Heading1'],
-        fontSize=16,
+        fontSize=14,
         textColor=colors.HexColor('#2C3E50'),
         alignment=TA_CENTER,
-        spaceAfter=20
+        spaceAfter=15
     )
     
     topic_style = ParagraphStyle(
         'TopicStyle',
         parent=styles['Normal'],
-        fontSize=12,
+        fontSize=11,
         textColor=colors.HexColor('#34495E'),
         leftIndent=10,
         spaceAfter=8,
-        backColor=colors.HexColor('#ECF0F1'),
-        borderPadding=5
+        backColor=colors.HexColor('#ECF0F1')
     )
     
     text_style = ParagraphStyle(
         'TextStyle',
         parent=styles['Normal'],
-        fontSize=11,
-        spaceAfter=6,
+        fontSize=10,
+        spaceAfter=5,
         leftIndent=10,
-        rightIndent=10,
-        leading=16
+        rightIndent=10
     )
     
-    # Add header
+    # Header
     story.append(Paragraph(f"📚 {title}", header_style))
     story.append(Paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}", 
                           styles['Italic']))
     story.append(Spacer(1, 15))
     
     for idx, rec in enumerate(records):
-        # Topic header
+        # Topic
         topic_text = f"<b>Topic:</b> {rec['topic']} | <b>Date:</b> {rec['timestamp'][:16]}"
         story.append(Paragraph(topic_text, topic_style))
         story.append(Spacer(1, 5))
@@ -213,70 +204,39 @@ def generate_pdf_sync(records, downloaded_images, title):
         if rec['type'] == 'photo' and idx in downloaded_images:
             img_path = downloaded_images[idx]
             try:
-                # Get image dimensions
+                # Quick image sizing
                 img = Image.open(img_path)
                 img_width, img_height = img.size
                 
-                # Calculate available space
-                page_width = A4[0] - 40  # 40mm margins
-                page_height = A4[1] - 100  # 100mm for header/footer
+                page_width = A4[0] - 60
+                page_height = A4[1] - 120
                 
-                # Check if image is landscape or portrait
-                is_landscape = img_width > img_height
+                # Calculate best fit
+                ratio = min(page_width / img_width, page_height / img_height)
+                width = img_width * ratio * 0.9
+                height = img_height * ratio * 0.9
                 
-                if is_landscape:
-                    # Landscape image - use full width
-                    width = page_width
-                    height = (img_height * page_width) / img_width
-                    
-                    # If too tall, fit to page height
-                    if height > page_height:
-                        height = page_height
-                        width = (img_width * page_height) / img_height
-                else:
-                    # Portrait image - fit to page
-                    height = page_height
-                    width = (img_width * page_height) / img_height
-                    
-                    # If too wide, fit to page width
-                    if width > page_width:
-                        width = page_width
-                        height = (img_height * page_width) / img_width
-                
-                # Ensure minimum size
-                if width < 100 or height < 100:
-                    width = min(page_width, 400)
-                    height = min(page_height, 400)
-                
-                # Add image with proper sizing
-                story.append(Spacer(1, 10))
+                story.append(Spacer(1, 8))
                 story.append(RLImage(img_path, width=width, height=height))
-                story.append(Spacer(1, 10))
+                story.append(Spacer(1, 8))
                 
             except Exception as e:
                 logger.error(f"Error adding image {idx}: {e}")
-                story.append(Paragraph("⚠️ Image could not be loaded", text_style))
+                story.append(Paragraph("⚠️ Image error", text_style))
             
         elif rec['type'] == 'text':
-            # Format text content
             text_content = safe_str(rec['content'])
-            # Split into paragraphs
-            paragraphs = text_content.split('\n')
-            for para in paragraphs:
-                if para.strip():
-                    # Wrap long text
-                    wrapped_para = para
-                    if len(para) > 100:
-                        wrapped_para = para[:100] + "..."
-                    story.append(Paragraph(wrapped_para, text_style))
-                    story.append(Spacer(1, 3))
+            # Simple text formatting
+            if len(text_content) > 500:
+                text_content = text_content[:500] + "..."
+            story.append(Paragraph(text_content, text_style))
         
-        story.append(Spacer(1, 10))
+        story.append(Spacer(1, 8))
         story.append(Paragraph("<hr/>", styles['Normal']))
-        story.append(Spacer(1, 10))
+        story.append(Spacer(1, 8))
     
-    # Add footer
-    story.append(Spacer(1, 20))
+    # Footer
+    story.append(Spacer(1, 15))
     story.append(Paragraph(f"<i>Generated by Bittu Study Bot - {len(records)} entries</i>", 
                           styles['Italic']))
     
@@ -284,7 +244,7 @@ def generate_pdf_sync(records, downloaded_images, title):
     doc.build(story)
     pdf_buffer.seek(0)
     
-    # Cleanup temp files
+    # Cleanup
     for path in downloaded_images.values():
         if path and os.path.exists(path):
             try:
@@ -294,69 +254,93 @@ def generate_pdf_sync(records, downloaded_images, title):
     
     return pdf_buffer
 
+# ==================== PDF GENERATION WITH PROGRESS ====================
 async def generate_and_send_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                                 query_sql: str, params: tuple, title: str):
+    """Generate and send PDF with instant download"""
     chat_id = update.effective_chat.id
-    message_to_edit = update.message if update.message else update.callback_query.message
     
-    cache_key = get_cache_key(query_sql, params, title)
-    if cache_key in pdf_cache:
-        cached_time, cached_pdf = pdf_cache[cache_key]
-        if time.time() - cached_time < CACHE_EXPIRY:
-            await message_to_edit.reply_text("⚡ Loading from cache...")
-            await context.bot.send_document(
-                chat_id=chat_id,
-                document=BytesIO(cached_pdf),
-                filename=f"Study_Report_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
-                caption=f"📄 **{title}** Ready! (Cached)"
-            )
+    # Get the message to edit
+    if update.message:
+        status_msg = await update.message.reply_text("⏳ Generating PDF...")
+    elif update.callback_query:
+        status_msg = await update.callback_query.message.reply_text("⏳ Generating PDF...")
+    else:
+        return
+    
+    try:
+        # Check cache first
+        cache_key = get_cache_key(query_sql, params, title)
+        if cache_key in pdf_cache:
+            cached_time, cached_pdf = pdf_cache[cache_key]
+            if time.time() - cached_time < CACHE_EXPIRY:
+                await status_msg.edit_text("⚡ Sending cached PDF...")
+                await context.bot.send_document(
+                    chat_id=chat_id,
+                    document=BytesIO(cached_pdf),
+                    filename=f"Study_Report_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
+                    caption=f"📄 **{title}** Ready!"
+                )
+                await status_msg.delete()
+                return
+
+        # Query database
+        conn = sqlite3.connect(DB_FILE)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(query_sql, params)
+        records = cursor.fetchall()
+        conn.close()
+
+        if not records:
+            await status_msg.edit_text("⚠️ No records found.")
             return
 
-    status_msg = await message_to_edit.reply_text("⏳ Generating your PDF...")
+        await status_msg.edit_text(f"📊 Processing {len(records)} items...")
 
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    cursor.execute(query_sql, params)
-    records = cursor.fetchall()
-    conn.close()
+        # Download images in parallel
+        photo_records = [(idx, r) for idx, r in enumerate(records) if r['type'] == 'photo']
+        downloaded_images = {}
+        
+        if photo_records:
+            await status_msg.edit_text(f"📸 Downloading {len(photo_records)} images...")
+            download_tasks = []
+            for idx, rec in photo_records:
+                download_tasks.append(fetch_image_fast(context.bot, rec['content'], idx))
+            
+            results = await asyncio.gather(*download_tasks)
+            downloaded_images = {idx: path for idx, path in results if path}
 
-    if not records:
-        await status_msg.edit_text("⚠️ No records found for this selection.")
-        return
+        # Generate PDF
+        await status_msg.edit_text("📄 Creating PDF...")
+        loop = asyncio.get_event_loop()
+        pdf_buffer = await loop.run_in_executor(
+            executor,
+            generate_pdf_fast,
+            records,
+            downloaded_images,
+            title
+        )
 
-    # Download images in parallel
-    photo_records = [(idx, r) for idx, r in enumerate(records) if r['type'] == 'photo']
-    download_tasks = []
-    for idx, rec in photo_records:
-        download_tasks.append(fetch_image_optimized(context.bot, rec['content'], idx))
-    
-    downloaded_images = {}
-    if download_tasks:
-        results = await asyncio.gather(*download_tasks)
-        downloaded_images = {idx: path for idx, path in results if path}
+        # Cache
+        pdf_data = pdf_buffer.getvalue()
+        pdf_cache[cache_key] = (time.time(), pdf_data)
 
-    # Generate PDF in background thread
-    loop = asyncio.get_event_loop()
-    pdf_buffer = await loop.run_in_executor(
-        executor,
-        generate_pdf_sync,
-        records,
-        downloaded_images,
-        title
-    )
-
-    pdf_data = pdf_buffer.getvalue()
-    pdf_cache[cache_key] = (time.time(), pdf_data)
-
-    await status_msg.edit_text("📤 Uploading your PDF...")
-    await context.bot.send_document(
-        chat_id=chat_id,
-        document=BytesIO(pdf_data),
-        filename=f"Study_Report_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
-        caption=f"📄 **{title}** Ready! ({len(records)} items)"
-    )
-    await status_msg.delete()
+        # Send PDF immediately
+        await status_msg.edit_text("📤 Sending PDF...")
+        await context.bot.send_document(
+            chat_id=chat_id,
+            document=BytesIO(pdf_data),
+            filename=f"Study_Report_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
+            caption=f"📄 **{title}** Ready! ({len(records)} items)"
+        )
+        
+        # Delete status message
+        await status_msg.delete()
+        
+    except Exception as e:
+        logger.error(f"PDF generation error: {e}")
+        await status_msg.edit_text(f"❌ Error: {str(e)[:100]}")
 
 # ==================== BOT HANDLERS ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -382,9 +366,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📸 **Save Content:**\n"
         "Send screenshots or text, then reply with `#topic`.\n\n"
         "📊 **Generate PDFs:**\n"
-        "Use the buttons below or commands:\n"
+        "Use buttons below or commands:\n"
         "/daily_pdf, /weekly_pdf, /monthly_pdf, /topic_pdf\n\n"
-        "👇 *Use the menu below:*"
+        "👇 *Use menu:*"
     )
     
     if update.message:
@@ -510,9 +494,8 @@ async def topic_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         topics = get_all_topics()
         if topics:
-            # Show topics with inline buttons
             keyboard = []
-            for topic in topics[:15]:  # Show first 15 topics
+            for topic in topics[:15]:
                 keyboard.append([InlineKeyboardButton(f"📌 {topic}", callback_data=f"topic_select_{topic}")])
             keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="menu_back")])
             reply_markup = InlineKeyboardMarkup(keyboard)
@@ -657,8 +640,9 @@ async def search_notes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(msg, parse_mode="Markdown")
 
-async def ai_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    help_text = """
+async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        help_text = """
 🤖 *AI Assistant Help*
 
 *Commands:*
@@ -673,11 +657,7 @@ async def ai_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • /ai today
 • /ai search chemistry
 """
-    await update.message.reply_text(help_text, parse_mode="Markdown")
-
-async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await ai_help(update, context)
+        await update.message.reply_text(help_text, parse_mode="Markdown")
         return
     
     query = ' '.join(context.args).lower()
@@ -729,7 +709,7 @@ async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text("Usage: /ai search [text]")
     else:
-        await ai_help(update, context)
+        await update.message.reply_text("Unknown command. Use /ai for help.")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = """
@@ -776,7 +756,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
     
-    # Handle topic selection from button
     if data.startswith("topic_select_"):
         topic = data.replace("topic_select_", "")
         sql = "SELECT id, type, content, topic, timestamp FROM content_store WHERE LOWER(topic) LIKE ? ORDER BY timestamp ASC"
@@ -791,7 +770,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "menu_monthly":
         await monthly_pdf(update, context)
     elif data == "menu_topic":
-        # Show topic selection
         topics = get_all_topics()
         if topics:
             keyboard = []
@@ -824,7 +802,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pdf_cache.clear()
         await query.message.edit_text("🗑️ Cache cleared successfully!")
     elif data == "menu_ai":
-        await ai_help(update, context)
+        await ai_command(update, context)
     elif data == "menu_help":
         await help_command(update, context)
     elif data == "menu_back":
@@ -853,7 +831,7 @@ async def main():
         fallbacks=[CommandHandler("cancel", cancel)],
     )
     
-    # Core commands
+    # Add handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("daily_pdf", daily_pdf))
     application.add_handler(CommandHandler("weekly_pdf", weekly_pdf))
@@ -868,8 +846,6 @@ async def main():
     application.add_handler(CommandHandler("ai", ai_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("cancel", cancel))
-    
-    # Callback handler
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(conv_handler)
     
@@ -877,7 +853,7 @@ async def main():
     await application.initialize()
     await application.start()
     await application.updater.start_polling(drop_pending_updates=True)
-    logger.info("Telegram Bot Started Successfully!")
+    logger.info("🚀 Bot Started Successfully!")
     
     # Start Flask
     await run_flask()
