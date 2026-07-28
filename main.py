@@ -10,6 +10,8 @@ from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib import colors
 from reportlab.lib.utils import simpleSplit
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 
 from pypdf import PdfReader, PdfWriter
 
@@ -42,6 +44,39 @@ WAITING_FOR_CUSTOM_TOPIC = 2
 # Database File
 DB_FILE = "study_data.db"
 
+# ----------------- Unicode Font Setup (for Gujarati / other Indic scripts) -----------------
+GUJARATI_FONT_NAME = "NotoSansGujarati"
+GUJARATI_FONT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "NotoSansGujarati-Regular.ttf")
+GUJARATI_FONT_AVAILABLE = False
+
+if os.path.exists(GUJARATI_FONT_PATH):
+    try:
+        pdfmetrics.registerFont(TTFont(GUJARATI_FONT_NAME, GUJARATI_FONT_PATH))
+        GUJARATI_FONT_AVAILABLE = True
+        logger.info("Gujarati font loaded successfully.")
+    except Exception as e:
+        logger.error(f"Failed to register Gujarati font: {e}")
+else:
+    logger.warning(
+        f"Gujarati font not found at {GUJARATI_FONT_PATH}. "
+        "Gujarati text will not render correctly in PDFs until you add "
+        "'NotoSansGujarati-Regular.ttf' next to this script."
+    )
+
+
+def contains_gujarati(text: str) -> bool:
+    """Detects if a string contains any Gujarati Unicode script characters."""
+    if not text:
+        return False
+    return any('\u0A80' <= ch <= '\u0AFF' for ch in text)
+
+
+def font_for_text(text: str, bold: bool = False) -> str:
+    """Picks the right registered font name for a given piece of text."""
+    if contains_gujarati(text) and GUJARATI_FONT_AVAILABLE:
+        return GUJARATI_FONT_NAME
+    return "Helvetica-Bold" if bold else "Helvetica"
+
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -63,9 +98,12 @@ init_db()
 
 
 def safe_str(text: str) -> str:
+    """Keeps Unicode text (Gujarati etc.) intact; only strips characters PDF
+    fonts can't render at all, like emoji/control chars."""
     if not text:
-        return ""
-    return "".join(c if ord(c) < 128 else "" for c in text).strip() or "Study Note"
+        return "Study Note"
+    cleaned = "".join(c for c in text if c == "\n" or (ord(c) >= 32 and ord(c) not in range(0x1F300, 0x1FAFF)))
+    return cleaned.strip() or "Study Note"
 
 
 def get_recent_topics(limit=8):
@@ -361,9 +399,9 @@ def draw_wrapped_text(c, text, page_w, page_h, title, topic_tag, ts_str, page_nu
     margin_x = 30
     top_y = page_h - 90
     bottom_margin = 50
-    font_name = "Helvetica"
+    font_name = font_for_text(text)
     font_size = 12
-    line_height = 16
+    line_height = 18 if font_name == GUJARATI_FONT_NAME else 16
     max_width = page_w - 2 * margin_x
     page_num = page_num_start
 
@@ -375,7 +413,7 @@ def draw_wrapped_text(c, text, page_w, page_h, title, topic_tag, ts_str, page_nu
         c.drawString(20, page_h - 25, f"Title: {safe_str(title)}")
 
         c.setFillColor(colors.HexColor("#34495E"))
-        c.setFont("Helvetica-Bold", 10)
+        c.setFont(font_for_text(topic_tag, bold=True), 10)
         c.drawString(20, page_h - 60, f"Topic: {safe_str(topic_tag)} | Date: {ts_str[:16]}")
 
         c.setFillColor(colors.HexColor("#7F8C8D"))
@@ -482,7 +520,7 @@ async def generate_and_send_pdf(update: Update, context: ContextTypes.DEFAULT_TY
                 topic_tag, ts_str = rec[3], rec[4]
 
                 c.setFillColor(colors.HexColor("#34495E"))
-                c.setFont("Helvetica-Bold", 9)
+                c.setFont(font_for_text(topic_tag, bold=True), 9)
                 c.drawString(20, y_base - 12, f"Topic: {safe_str(topic_tag)} | Date: {ts_str[:16]} (#{rec[0]})")
 
                 img = Image.open(temp_path)
@@ -508,7 +546,7 @@ async def generate_and_send_pdf(update: Update, context: ContextTypes.DEFAULT_TY
             rec = current_rec
             topic_tag, ts_str = rec[3], rec[4]
             c.setFillColor(colors.HexColor("#34495E"))
-            c.setFont("Helvetica-Bold", 10)
+            c.setFont(font_for_text(topic_tag, bold=True), 10)
             c.drawString(20, page_h - 60, f"Topic: {safe_str(topic_tag)} | Date: {ts_str[:16]} (#{rec[0]})")
 
             if current_type == 'photo' and i in img_map:
@@ -571,7 +609,7 @@ async def generate_and_send_pdf(update: Update, context: ContextTypes.DEFAULT_TY
         dc.setFont("Helvetica-Bold", 10)
         dc.drawString(20, page_h - 25, f"Title: {safe_str(title)}")
         dc.setFillColor(colors.black)
-        dc.setFont("Helvetica-Bold", 14)
+        dc.setFont(font_for_text(topic_tag, bold=True), 14)
         dc.drawString(30, page_h / 2, f"📎 Attached PDF - Topic: {safe_str(topic_tag)}")
         dc.setFont("Helvetica", 11)
         dc.drawString(30, page_h / 2 - 25, f"Saved on: {ts_str[:16]} (#{rec[0]})")
