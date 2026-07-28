@@ -63,7 +63,6 @@ init_db()
 def safe_str(text: str) -> str:
     if not text:
         return ""
-    # Strip characters outside standard ASCII range to prevent ReportLab canvas crash
     return "".join(c if ord(c) < 128 else "" for c in text).strip() or "Study Note"
 
 # ----------------- AI Summary Helper -----------------
@@ -118,7 +117,7 @@ async def receive_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['pending_photo'] = photo_file_id
     
     await update.message.reply_text(
-        "📌 **Screenshot received!**\nPlease reply with the **#topic** (e.g., `#shiksha`, `#શિક્ષણ`, `#chemistry`):",
+        "📌 **Screenshot received!**\nPlease reply with the **#topic** (e.g., `#shiksha`, `#chemistry`):",
         parse_mode="Markdown"
     )
     return WAITING_FOR_TOPIC
@@ -183,37 +182,37 @@ async def generate_and_send_pdf(update: Update, context: ContextTypes.DEFAULT_TY
     c = canvas.Canvas(pdf_buffer, pagesize=A4)
     page_w, page_h = A4
 
-    # --- PAGE 1: Summary Page ---
+    # --- PAGE 1: Summary Index Page ---
     c.setFillColor(colors.HexColor("#1A2B4C"))
     c.rect(0, page_h - 90, page_w, 90, fill=True, stroke=False)
 
     c.setFillColor(colors.white)
-    c.setFont("Helvetica-Bold", 20)
-    c.drawString(25, page_h - 40, safe_str(title))
+    c.setFont("Helvetica-Bold", 18)
+    c.drawString(25, page_h - 40, f"Topic PDF Report")
     c.setFont("Helvetica", 10)
     c.drawString(25, page_h - 65, f"Generated: {datetime.now().strftime('%Y-%m-%d (%A)')}")
 
-    # Summary Section
+    # Index List
     y = page_h - 120
     c.setFillColor(colors.HexColor("#2C3E50"))
-    c.setFont("Helvetica-Bold", 13)
+    c.setFont("Helvetica-Bold", 12)
     c.drawString(25, y, f"Total Screenshots Compiled: {len(records)}")
     y -= 30
 
     for idx, r in enumerate(records, start=1):
         _, topic_tag, summary_txt, ts_str = r
         c.setFont("Helvetica-Bold", 10)
-        c.drawString(25, y, f"[{idx}] Topic: {safe_str(topic_tag)} ({ts_str[:10]})")
+        c.drawString(25, y, f"[{idx}] Topic: {safe_str(topic_tag)} | Date: {ts_str[:10]}")
         y -= 15
 
         c.setFont("Helvetica", 9)
         c.setFillColor(colors.HexColor("#444444"))
         
-        clean_sum = safe_str(summary_txt or "No summary available.").replace("\n", " ")
-        if len(clean_sum) > 120:
-            clean_sum = clean_sum[:117] + "..."
+        clean_sum = safe_str(summary_txt or "Summary recorded").replace("\n", " ")
+        if len(clean_sum) > 100:
+            clean_sum = clean_sum[:97] + "..."
             
-        c.drawString(35, y, f"Summary: {clean_sum}")
+        c.drawString(35, y, f"Note: {clean_sum}")
         y -= 25
         c.setFillColor(colors.HexColor("#2C3E50"))
 
@@ -273,12 +272,12 @@ async def generate_and_send_pdf(update: Update, context: ContextTypes.DEFAULT_TY
     c.save()
     pdf_buffer.seek(0)
 
-    clean_filename = f"{safe_str(title).replace(' ', '_')}.pdf"
+    clean_filename = f"Study_Notes_{datetime.now().strftime('%Y%m%d')}.pdf"
     await context.bot.send_document(
         chat_id=update.effective_chat.id,
         document=pdf_buffer,
         filename=clean_filename,
-        caption=f"📄 **{title}** Ready!\nIncludes {len(records)} page(s) + Summary."
+        caption=f"📄 **{title}** Ready!\nIncludes {len(records)} screenshot(s) + Index Page."
     )
 
 # PDF Command Handlers
