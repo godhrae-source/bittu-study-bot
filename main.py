@@ -19,15 +19,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    photo = update.message.photo[-1].file_id
+    file_id = update.message.photo[-1].file_id
 
     await context.bot.send_photo(
         chat_id=CHANNEL_ID,
-        photo=photo,
-        caption="📚 Study Screenshot"
+        photo=file_id,
+        caption="📚 Study Screenshot",
     )
 
-    await update.message.reply_text("✅ Saved to your study channel.")
+    await update.message.reply_text("✅ Saved successfully.")
 
 
 def main():
@@ -37,7 +37,7 @@ def main():
     app.add_handler(MessageHandler(filters.PHOTO, photo))
 
     print("Bot started...")
-    app.run_polling()
+    app.run_polling(close_loop=False)
 
 
 if __name__ == "__main__":
