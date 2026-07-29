@@ -19,7 +19,7 @@ from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from reportlab.lib.utils import ImageReader
 
 from flask import Flask, jsonify
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -522,8 +522,23 @@ async def date_range_pdf_command(update: Update, context: ContextTypes.DEFAULT_T
         f"Study Notes - {start_date} to {end_date}"
     )
 
+# ==================== TYPE AREA BUTTONS (PERSISTENT MENU) ====================
+def get_main_keyboard():
+    """Create persistent keyboard with buttons in the type area"""
+    keyboard = [
+        [KeyboardButton("📅 Daily PDF"), KeyboardButton("📊 Weekly PDF")],
+        [KeyboardButton("📈 Monthly PDF"), KeyboardButton("🏷️ Topic PDF")],
+        [KeyboardButton("📅 By Date"), KeyboardButton("📅 Date Range")],
+        [KeyboardButton("📁 My Data"), KeyboardButton("📋 All Topics")],
+        [KeyboardButton("⚡ Instant Report"), KeyboardButton("🔍 Search")],
+        [KeyboardButton("📊 Stats"), KeyboardButton("🗑️ Clear Cache")],
+        [KeyboardButton("❓ Help"), KeyboardButton("📚 Menu")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
+
 # ==================== BOT HANDLERS ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start command with persistent keyboard"""
     keyboard = [
         [InlineKeyboardButton("📅 Daily PDF", callback_data="menu_daily"),
          InlineKeyboardButton("📊 Weekly PDF", callback_data="menu_weekly")],
@@ -547,22 +562,77 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📸 **Save Content:**\n"
         "Send screenshots or text, then reply with `#topic`.\n\n"
         "📊 **Generate PDFs:**\n"
-        "Use buttons below or commands:\n"
+        "Use buttons below or type commands:\n"
         "/daily_pdf, /weekly_pdf, /monthly_pdf, /topic_pdf\n"
-        "/date_pdf [YYYY-MM-DD]\n"
-        "/daterange [start] [end]\n\n"
+        "/date_pdf, /daterange\n\n"
         "✨ **PDF Features:**\n"
         "• 🔍 Maximum image zoom\n"
         "• 📐 Minimal borders (5px)\n"
         "• 📄 Multiple images per page\n"
         "• 🚫 No wasted space\n\n"
-        "👇 *Use menu:*"
+        "👇 *Use menu below or type commands:*"
     )
     
     if update.message:
-        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=reply_markup)
+        await update.message.reply_text(
+            msg, 
+            parse_mode="Markdown", 
+            reply_markup=reply_markup
+        )
+        # Also show persistent keyboard
+        await update.message.reply_text(
+            "💡 *Quick Actions:* Use the buttons below or type commands like /start",
+            parse_mode="Markdown",
+            reply_markup=get_main_keyboard()
+        )
     elif update.callback_query:
-        await update.callback_query.message.edit_text(msg, parse_mode="Markdown", reply_markup=reply_markup)
+        await update.callback_query.message.edit_text(
+            msg, 
+            parse_mode="Markdown", 
+            reply_markup=reply_markup
+        )
+        # Also show persistent keyboard
+        await update.callback_query.message.reply_text(
+            "💡 *Quick Actions:* Use the buttons below or type commands like /start",
+            parse_mode="Markdown",
+            reply_markup=get_main_keyboard()
+        )
+
+async def handle_type_area_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle button clicks from type area (persistent keyboard)"""
+    text = update.message.text
+    
+    if text == "📅 Daily PDF":
+        await daily_pdf(update, context)
+    elif text == "📊 Weekly PDF":
+        await weekly_pdf(update, context)
+    elif text == "📈 Monthly PDF":
+        await monthly_pdf(update, context)
+    elif text == "🏷️ Topic PDF":
+        await topic_pdf(update, context)
+    elif text == "📅 By Date":
+        await date_pdf_command(update, context)
+    elif text == "📅 Date Range":
+        await date_range_pdf_command(update, context)
+    elif text == "📁 My Data":
+        await my_data(update, context)
+    elif text == "📋 All Topics":
+        await all_topics(update, context)
+    elif text == "⚡ Instant Report":
+        await instant_report(update, context)
+    elif text == "🔍 Search":
+        await search_notes(update, context)
+    elif text == "📊 Stats":
+        await stats_command(update, context)
+    elif text == "🗑️ Clear Cache":
+        await clear_cache(update, context)
+    elif text == "❓ Help":
+        await help_command(update, context)
+    elif text == "📚 Menu":
+        await start(update, context)
+    else:
+        # If unknown button, just ignore
+        pass
 
 async def receive_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo_file_id = update.message.photo[-1].file_id
@@ -582,6 +652,14 @@ async def receive_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text_content = update.message.text.strip()
     if text_content.startswith("/"):
+        return
+    
+    # Check if it's a type area button
+    if text_content in ["📅 Daily PDF", "📊 Weekly PDF", "📈 Monthly PDF", "🏷️ Topic PDF", 
+                        "📅 By Date", "📅 Date Range", "📁 My Data", "📋 All Topics",
+                        "⚡ Instant Report", "🔍 Search", "📊 Stats", "🗑️ Clear Cache",
+                        "❓ Help", "📚 Menu"]:
+        await handle_type_area_buttons(update, context)
         return
     
     if 'pending_items' not in context.user_data:
@@ -629,6 +707,13 @@ async def receive_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     context.user_data.pop('pending_items', None)
     context.user_data.pop('asked_topic', None)
+    
+    # Show menu after saving
+    await update.message.reply_text(
+        "💡 *Quick Actions:* Use the buttons below or type /start for menu",
+        parse_mode="Markdown",
+        reply_markup=get_main_keyboard()
+    )
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -864,8 +949,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • /instant - Today's instant report
 
 *💡 Tips:*
+• Use the buttons at the bottom for quick access
 • Use #topic for organization
-• Choose from menu for quick actions
 • Cache makes PDFs faster!
 """
     await update.message.reply_text(help_text, parse_mode="Markdown")
