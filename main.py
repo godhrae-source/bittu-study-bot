@@ -756,3 +756,364 @@ async def monthly_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args:
         topic = context.args[0].strip().replace("#", "")
         month_ago = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+        sql = "SELECT id, type, content, topic, timestamp FROM content_store WHERE timestamp >= ? AND LOWER(topic) LIKE ? ORDER BY timestamp ASC"
+        await generate_and_send_pdf_with_summary(update, context, sql, (month_ago, f"%{topic.lower()}%"),
+                                    f"Monthly Notes - #{topic}")
+    else:
+        month_ago = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+        sql = "SELECT id, type, content, topic, timestamp FROM content_store WHERE timestamp >= ? ORDER BY timestamp ASC"
+        await generate_and_send_pdf_with_summary(update, context, sql, (month_ago,), "Monthly Notes (All)")
+
+async def topic_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        topics = get_all_topics()
+        if topics:
+            keyboard = []
+            for topic in topics[:15]:
+                keyboard.append([InlineKeyboardButton(f"📌 {topic}", callback_data=f"topic_select_{topic}")])
+            keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="menu_back")])
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await update.message.reply_text(
+                "🏷️ *Select a topic:*\n\nOr use `/topic_pdf topic_name`\n\n"
+                "🏷️ *વિષય પસંદ કરો:*",
+                parse_mode="Markdown",
+                reply_markup=reply_markup
+            )
+        else:
+            await update.message.reply_text("⚠️ No topics found. Add some data first!")
+        return
+    
+    user_topic = context.args[0].strip().replace("#", "")
+    sql = "SELECT id, type, content, topic, timestamp FROM content_store WHERE LOWER(topic) LIKE ? ORDER BY timestamp ASC"
+    await generate_and_send_pdf_with_summary(update, context, sql, (f"%{user_topic.lower()}%",),
+                                f"Topic PDF - #{user_topic}")
+
+async def clear_cache(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    pdf_cache.clear()
+    await update.message.reply_text("🗑️ Cache cleared successfully!")
+
+async def all_topics(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    topics = get_all_topics()
+    if not topics:
+        await update.message.reply_text("No topics found.")
+        return
+    
+    msg = "📋 *All Topics:*\n\n"
+    for topic in topics:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM content_store WHERE topic = ?", (topic,))
+        count = cursor.fetchone()[0]
+        conn.close()
+        msg += f"• `{topic}` ({count} items)\n"
+    
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+async def my_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, type, topic, timestamp 
+        FROM content_store 
+        ORDER BY timestamp DESC 
+        LIMIT 10
+    """)
+    records = cursor.fetchall()
+    conn.close()
+    
+    if not records:
+        await update.message.reply_text("No data found.")
+        return
+    
+    msg = "📁 *Your Recent Entries:*\n\n"
+    for rec in records:
+        msg += f"• #{rec[0]} | {rec[1]} | {rec[2]} | {rec[3][:16]}\n"
+    
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+async def instant_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    today = datetime.now().strftime("%Y-%m-%d") + "%"
+    sql = "SELECT id, type, content, topic, timestamp FROM content_store WHERE timestamp LIKE ? ORDER BY timestamp ASC"
+    await generate_and_send_pdf_with_summary(update, context, sql, (today,), "📊 Instant Report - Today")
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT COUNT(*) FROM content_store")
+    total = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT COUNT(DISTINCT topic) FROM content_store")
+    topics = cursor.fetchone()[0]
+    
+    today = datetime.now().strftime("%Y-%m-%d")
+    cursor.execute("SELECT COUNT(*) FROM content_store WHERE date(timestamp) = ?", (today,))
+    today_count = cursor.fetchone()[0]
+    
+    week_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+    cursor.execute("SELECT COUNT(*) FROM content_store WHERE date(timestamp) >= ?", (week_ago,))
+    week_count = cursor.fetchone()[0]
+    
+    cursor.execute("""
+        SELECT topic, COUNT(*) as count 
+        FROM content_store 
+        GROUP BY topic 
+        ORDER BY count DESC 
+        LIMIT 5
+    """)
+    top_topics = cursor.fetchall()
+    
+    conn.close()
+    
+    msg = f"📊 *Study Statistics*\n\n"
+    msg += f"📚 Total Notes: {total}\n"
+    msg += f"🏷️ Topics: {topics}\n"
+    msg += f"📅 Today: {today_count} entries\n"
+    msg += f"📆 This Week: {week_count} entries\n\n"
+    
+    if top_topics:
+        msg += "*Top Topics:*\n"
+        for topic, count in top_topics:
+            bar = "▰" * min(count, 10) + "▱" * max(0, 10 - min(count, 10))
+            msg += f"• {topic}: {bar} {count}\n"
+    
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+async def search_notes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text(
+            "🔍 *Search Notes*\n\n"
+            "Usage: `/search your query`\n"
+            "Example: `/search physics`\n"
+            "Or: `/search topic:chemistry`"
+        )
+        return
+    
+    query = ' '.join(context.args).lower()
+    
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    
+    if 'topic:' in query:
+        topic = query.split('topic:')[1].strip()
+        cursor.execute("SELECT content, topic, timestamp FROM content_store WHERE LOWER(topic) LIKE ? LIMIT 10", (f'%{topic}%',))
+    else:
+        cursor.execute("SELECT content, topic, timestamp FROM content_store WHERE LOWER(content) LIKE ? OR LOWER(topic) LIKE ? LIMIT 10", (f'%{query}%', f'%{query}%'))
+    
+    results = cursor.fetchall()
+    conn.close()
+    
+    if not results:
+        await update.message.reply_text(f"❌ No results found for '{query}'")
+        return
+    
+    msg = f"🔍 *Results ({len(results)}) for '{query}':*\n\n"
+    for content, topic, timestamp in results[:5]:
+        preview = content[:150] + "..." if len(content) > 150 else content
+        msg += f"📌 *{topic}* ({timestamp[:16]})\n{preview}\n\n"
+    
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+async def ai_summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Generate AI summary for today's content in Gujarati"""
+    today = datetime.now().strftime("%Y-%m-%d") + "%"
+    
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM content_store WHERE timestamp LIKE ? ORDER BY timestamp ASC", (today,))
+    records = cursor.fetchall()
+    conn.close()
+    
+    if not records:
+        await update.message.reply_text(
+            "📝 *AI Summary*\n\n"
+            "આજે કોઈ સામગ્રી નથી.\n"
+            "No content found for today."
+        )
+        return
+    
+    summary = summarizer.summarize_for_pdf(records, "Today's Summary")
+    
+    topic_summaries = []
+    topics = {}
+    for rec in records:
+        topic = rec['topic']
+        if topic not in topics:
+            topics[topic] = []
+        topics[topic].append(rec)
+    
+    for topic, recs in topics.items():
+        topic_summary = summarizer.get_topic_summary(recs, topic)
+        topic_summaries.append(topic_summary)
+    
+    msg = "🤖 *AI Summary (Gujarati)*\n\n"
+    msg += f"📅 તારીખ: {datetime.now().strftime('%Y-%m-%d')}\n"
+    msg += f"📊 કુલ એન્ટ્રીઓ: {len(records)}\n\n"
+    msg += "---\n\n"
+    msg += summary
+    msg += "\n\n---\n\n"
+    msg += "📌 *વિષયવાર સારાંશ:*\n\n"
+    msg += "\n\n".join(topic_summaries)
+    
+    await update.message.reply_text(msg[:4000], parse_mode="Markdown")
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    help_text = """
+📚 *Bittu Study Bot Help*
+
+*📸 Save Content:*
+• Send photo → Reply with #topic
+• Send text → Reply with #topic
+
+*📊 Generate PDFs (with AI Gujarati Summary + Index):*
+• /daily_pdf - Today's notes
+• /weekly_pdf - Last 7 days
+• /monthly_pdf - Last 30 days
+• /topic_pdf [topic] - Topic wise
+
+✨ *PDF Features:*
+• 📋 Index page in Gujarati with all image titles
+• 📅 Header with Date, Day, Total Images
+• 🖼️ Smart page packing (multiple small images on 1 page)
+• 📐 Auto-fit for vertical & horizontal images
+• 🤖 AI Gujarati summary on first page
+• 🚫 No white space waste
+
+*🤖 AI Features:*
+• /aisummary - Today's AI summary in Gujarati
+
+*🔍 Search & Stats:*
+• /search [query] - Search notes
+• /stats - Study statistics
+• /alltopics - Show all topics
+• /mydata - Show recent entries
+
+*📌 Other:*
+• /start - Main menu
+• /cancel - Cancel operation
+• /clearcache - Clear PDF cache
+• /instant - Today's instant report
+
+*💡 Tips:*
+• Use #topic for organization
+• Choose from menu for quick actions
+• Cache makes PDFs faster!
+"""
+    await update.message.reply_text(help_text, parse_mode="Markdown")
+
+# ==================== BUTTON HANDLERS ====================
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    
+    if data.startswith("topic_select_"):
+        topic = data.replace("topic_select_", "")
+        sql = "SELECT id, type, content, topic, timestamp FROM content_store WHERE LOWER(topic) LIKE ? ORDER BY timestamp ASC"
+        await generate_and_send_pdf_with_summary(update, context, sql, (f"%{topic.lower()}%",),
+                                    f"Topic PDF - {topic}")
+        return
+    
+    if data == "menu_daily":
+        await daily_pdf(update, context)
+    elif data == "menu_weekly":
+        await weekly_pdf(update, context)
+    elif data == "menu_monthly":
+        await monthly_pdf(update, context)
+    elif data == "menu_topic":
+        topics = get_all_topics()
+        if topics:
+            keyboard = []
+            for topic in topics[:15]:
+                keyboard.append([InlineKeyboardButton(f"📌 {topic}", callback_data=f"topic_select_{topic}")])
+            keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="menu_back")])
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.message.edit_text(
+                "🏷️ *Select a topic:*\n\n"
+                "🏷️ *વિષય પસંદ કરો:*",
+                parse_mode="Markdown",
+                reply_markup=reply_markup
+            )
+        else:
+            await query.message.edit_text("⚠️ No topics found. Add some data first!")
+    elif data == "menu_my_data":
+        await my_data(update, context)
+    elif data == "menu_all_topics":
+        await all_topics(update, context)
+    elif data == "menu_instant":
+        await instant_report(update, context)
+    elif data == "menu_search":
+        await query.message.edit_text(
+            "🔍 *Search Notes*\n\n"
+            "Use `/search your query`\n"
+            "Example: `/search physics`"
+        )
+    elif data == "menu_stats":
+        await stats_command(update, context)
+    elif data == "menu_clear_cache":
+        pdf_cache.clear()
+        await query.message.edit_text("🗑️ Cache cleared successfully!")
+    elif data == "menu_ai_summary":
+        await ai_summary_command(update, context)
+    elif data == "menu_help":
+        await help_command(update, context)
+    elif data == "menu_back":
+        await start(update, context)
+
+# ==================== MAIN ====================
+async def main():
+    if not BOT_TOKEN:
+        logger.error("BOT_TOKEN environment variable not set!")
+        return
+    
+    application = Application.builder().token(BOT_TOKEN).build()
+    
+    # Conversation handler
+    conv_handler = ConversationHandler(
+        entry_points=[
+            MessageHandler(filters.PHOTO, receive_photo),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text),
+        ],
+        states={
+            WAITING_FOR_TOPIC: [
+                MessageHandler(filters.PHOTO, receive_photo),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_topic),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+    
+    # Add handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("daily_pdf", daily_pdf))
+    application.add_handler(CommandHandler("weekly_pdf", weekly_pdf))
+    application.add_handler(CommandHandler("monthly_pdf", monthly_pdf))
+    application.add_handler(CommandHandler("topic_pdf", topic_pdf))
+    application.add_handler(CommandHandler("clearcache", clear_cache))
+    application.add_handler(CommandHandler("alltopics", all_topics))
+    application.add_handler(CommandHandler("mydata", my_data))
+    application.add_handler(CommandHandler("instant", instant_report))
+    application.add_handler(CommandHandler("search", search_notes))
+    application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(CommandHandler("aisummary", ai_summary_command))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("cancel", cancel))
+    application.add_handler(CallbackQueryHandler(button_handler))
+    application.add_handler(conv_handler)
+    
+    # Start bot
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling(drop_pending_updates=True)
+    logger.info("🚀 Bot Started Successfully!")
+    
+    # Start Flask
+    await run_flask()
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Bot stopped.")
