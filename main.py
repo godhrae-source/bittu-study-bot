@@ -634,10 +634,6 @@ async def my_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def instant_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     today = datetime.now().strftime("%Y-%m-%d") + "%"
     sql = "SELECT id, type, content, topic, timestamp FROM content_store WHERE timestamp LIKE ? ORDER BY timestamp ASC"
-    await generate_and_send_pdf_with_summary(update
-       async def instant_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    today = datetime.now().strftime("%Y-%m-%d") + "%"
-    sql = "SELECT id, type, content, topic, timestamp FROM content_store WHERE timestamp LIKE ? ORDER BY timestamp ASC"
     await generate_and_send_pdf_with_summary(update, context, sql, (today,), "📊 Instant Report - Today")
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -787,4 +783,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        logger.info("Bot stopped.")                      
+        logger.info("Bot stopped.")
