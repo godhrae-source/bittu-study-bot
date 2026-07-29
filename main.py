@@ -162,8 +162,9 @@ async def generate_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE,
     chat_id = update.effective_chat.id
     
     try:
-        # STEP 1: Get records safely
+        # STEP 1: Get records safely (FIX: Added row_factory to fix 'tuple indices must be integers' error)
         conn = sqlite3.connect(DB_FILE, timeout=5)
+        conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute(query_sql, params)
         records = cursor.fetchall()
@@ -190,8 +191,8 @@ async def generate_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE,
         # STEP 3: Download images ONE BY ONE (Saves RAM)
         downloaded_images = {}
         for idx, rec in enumerate(records):
-            if rec[1] == 'photo':
-                path = await fetch_single_image(context.bot, rec[2])
+            if rec['type'] == 'photo':
+                path = await fetch_single_image(context.bot, rec['content'])
                 if path:
                     downloaded_images[idx] = path
 
