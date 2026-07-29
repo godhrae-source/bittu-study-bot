@@ -10,7 +10,7 @@ from io import BytesIO
 from PIL import Image
 from concurrent.futures import ThreadPoolExecutor
 
-from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib import colors
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Image as RLImage, PageBreak
@@ -124,6 +124,19 @@ class GujaratiSummarizer:
         header = "📝 સારાંશ (Summary)\n"
         footer = f"\n---\n📊 કુલ {len(records)} એન્ટ્રીઓ | {len(all_text)} ટેક્સ્ટ એન્ટ્રીઓ"
         return header + summary + footer
+    
+    def get_topic_summary(self, records, topic):
+        if not records:
+            return f"'{topic}' વિષય પર કોઈ સામગ્રી નથી."
+        all_text = []
+        for rec in records:
+            if rec['type'] == 'text':
+                all_text.append(rec['content'])
+        if not all_text:
+            return f"'{topic}' વિષય પર ફક્ત ફોટાઓ છે."
+        combined_text = ' '.join(all_text)
+        summary = self.generate_summary(combined_text, 120)
+        return f"📌 {topic} વિષયનો સારાંશ:\n\n{summary}"
 
 summarizer = GujaratiSummarizer()
 
@@ -220,6 +233,7 @@ async def run_flask():
 
 # ==================== IMAGE HANDLING ====================
 async def fetch_image_fast(bot, file_id, idx):
+    """Fetch image and return path and size"""
     try:
         tg_file = await bot.get_file(file_id)
         file_bytes = await tg_file.download_as_bytearray()
@@ -228,10 +242,11 @@ async def fetch_image_fast(bot, file_id, idx):
             img.thumbnail((1200, 1200), Image.Resampling.LANCZOS)
         temp_path = f"temp_{idx}_{int(time.time())}.jpg"
         img.save(temp_path, "JPEG", quality=85, optimize=True)
-        return idx, temp_path, img.size
+        # Return path and size as tuple
+        return (idx, temp_path, img.size)
     except Exception as e:
         logger.error(f"Error downloading photo {file_id}: {e}")
-        return idx, None, None
+        return (idx, None, None)
 
 # ==================== SMART PDF GENERATOR WITH INDEX ====================
 def generate_smart_pdf(records, downloaded_images, title, summary_text, record_ids):
@@ -329,15 +344,15 @@ def generate_smart_pdf(records, downloaded_images, title, summary_text, record_i
     for idx, rec in enumerate(records, 1):
         topic = rec['topic']
         timestamp = rec['timestamp'][:16]
-        # Create a title from topic or content
         if rec['type'] == 'photo':
             title_text = f"Image {idx}"
         else:
-            title_text = rec['content'][:50] + "..." if len(rec['content']) > 50 else rec['content']
+            content_preview = rec['content'][:50] + "..." if len(rec['content']) > 50 else rec['content']
+            title_text = content_preview
         index_entries.append(f"{idx}. {topic} - {title_text} ({timestamp})")
     
     # Display index in columns for better use of space
-    for entry in index_entries[:20]:  # Show up to 20 entries on index page
+    for entry in index_entries[:20]:
         story.append(Paragraph(entry, index_style))
         story.append(Spacer(1, 2))
     
@@ -362,90 +377,50 @@ def generate_smart_pdf(records, downloaded_images, title, summary_text, record_i
     current_page_photos = []
     current_page_texts = []
     current_page_height = 0
-    max_page_height = usable_height - 80  # Reserve space for headers
+    max_page_height = usable_height - 80
     
     def flush_page():
         nonlocal story, current_page_photos, current_page_texts, current_page_height
         if current_page_photos or current_page_texts:
             # Add page header
-            story.append(Paragraph(f"📷 પૃષ્ઠ (Page) {len(story) + 1}", sub_header_style))
+            story.append(Paragraph(f"📷 પૃષ્ઠ", sub_header_style))
             story.append(Spacer(1, 5))
             
             # Add photos with smart layout
             if current_page_photos:
-                # Calculate grid layout
                 num_photos = len(current_page_photos)
                 if num_photos == 1:
                     # Single photo - use full page
-                    img_path, img_size = current_page_photos[0][1], current_page_photos[0][2]
+                    img_path = current_page_photos[0][0]
                     if img_path:
-                        w, h = img_size
-                        # Fit to page
-                        max_w = usable_width - 20
-                        max_h = usable_height - 100
-                        ratio = min(max_w / w, max_h / h)
-                        width = w * ratio * 0.95
-                        height = h * ratio * 0.95
-                        story.append(RLImage(img_path, width=width, height=height))
+                        story.append(RLImage(img_path, width=usable_width-20, height=usable_height-120))
                 elif num_photos == 2:
-                    # Two photos - side by side or stacked based on orientation
-                    img1_path, img1_size = current_page_photos[0][1], current_page_photos[0][2]
-                    img2_path, img2_size = current_page_photos[1][1], current_page_photos[1][2]
+                    # Two photos - side by side or stacked
+                    img1_path = current_page_photos[0][0]
+                    img2_path = current_page_photos[1][0]
                     
                     if img1_path and img2_path:
-                        w1, h1 = img1_size
-                        w2, h2 = img2_size
+                        half_width = (usable_width - 10) / 2
+                        half_height = usable_height - 120
                         
-                        # Check if both are horizontal (landscape)
-                        if w1 > h1 and w2 > h2:
-                            # Side by side for horizontal images
-                            half_width = (usable_width - 10) / 2
-                            ratio1 = min(half_width / w1, (usable_height - 80) / h1)
-                            ratio2 = min(half_width / w2, (usable_height - 80) / h2)
-                            width1 = w1 * ratio1 * 0.9
-                            height1 = h1 * ratio1 * 0.9
-                            width2 = w2 * ratio2 * 0.9
-                            height2 = h2 * ratio2 * 0.9
-                            
-                            # Create side by side
-                            story.append(Spacer(1, 5))
-                            story.append(RLImage(img1_path, width=width1, height=height1))
-                            story.append(Spacer(1, 5))
-                            story.append(RLImage(img2_path, width=width2, height=height2))
-                        else:
-                            # Stack vertically
-                            max_w = usable_width - 20
-                            max_h = (usable_height - 100) / 2
-                            
-                            ratio1 = min(max_w / w1, max_h / h1)
-                            width1 = w1 * ratio1 * 0.9
-                            height1 = h1 * ratio1 * 0.9
-                            
-                            ratio2 = min(max_w / w2, max_h / h2)
-                            width2 = w2 * ratio2 * 0.9
-                            height2 = h2 * ratio2 * 0.9
-                            
-                            story.append(RLImage(img1_path, width=width1, height=height1))
-                            story.append(Spacer(1, 5))
-                            story.append(RLImage(img2_path, width=width2, height=height2))
+                        story.append(Spacer(1, 5))
+                        # Side by side
+                        story.append(RLImage(img1_path, width=half_width-10, height=half_height))
+                        story.append(Spacer(1, 5))
+                        story.append(RLImage(img2_path, width=half_width-10, height=half_height))
                 else:
                     # 3+ photos - grid layout
                     cols = 2 if num_photos <= 4 else 3
                     rows = (num_photos + cols - 1) // cols
                     
                     cell_width = (usable_width - (cols - 1) * 5) / cols
-                    cell_height = (usable_height - 100 - (rows - 1) * 5) / rows
+                    cell_height = (usable_height - 120 - (rows - 1) * 5) / rows
                     
                     # Add images in grid
-                    for i, (img_path, img_size, rec) in enumerate(current_page_photos):
+                    for i, (img_path) in enumerate(current_page_photos):
                         if img_path:
-                            w, h = img_size
-                            ratio = min(cell_width / w, cell_height / h)
-                            width = w * ratio * 0.85
-                            height = h * ratio * 0.85
-                            
-                            # Add topic label
-                            story.append(Paragraph(f"📌 {rec['topic']}", topic_style))
+                            width = cell_width * 0.85
+                            height = cell_height * 0.85
                             story.append(RLImage(img_path, width=width, height=height))
                             story.append(Spacer(1, 3))
             
@@ -470,16 +445,16 @@ def generate_smart_pdf(records, downloaded_images, title, summary_text, record_i
     # Process all items with smart packing
     for idx, rec in enumerate(records):
         if rec['type'] == 'photo' and idx in downloaded_images:
-            img_path, img_size = downloaded_images[idx], downloaded_images.get(f"{idx}_size", (400, 300))
+            img_path = downloaded_images[idx]
             # Estimate space needed
-            photo_height = min(img_size[1], 400)
+            photo_height = 300
             
             # Check if adding this photo exceeds page height
             if current_page_height + photo_height + 60 > max_page_height and current_page_photos:
                 flush_page()
                 current_page_height = 0
             
-            current_page_photos.append((img_path, img_size, rec))
+            current_page_photos.append((img_path, rec))
             current_page_height += photo_height + 30
             
         elif rec['type'] == 'text':
@@ -538,7 +513,7 @@ async def generate_and_send_pdf_with_summary(update: Update, context: ContextTyp
                     chat_id=chat_id,
                     document=BytesIO(cached_pdf),
                     filename=f"Study_Report_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
-                    caption=f"📄 **{title}** Ready! (Cached)\n📸 Total: {len(records)} images" if 'records' in locals() else f"📄 **{title}** Ready! (Cached)"
+                    caption=f"📄 **{title}** Ready! (Cached)"
                 )
                 await status_msg.delete()
                 return
@@ -572,10 +547,10 @@ async def generate_and_send_pdf_with_summary(update: Update, context: ContextTyp
                 download_tasks.append(fetch_image_fast(context.bot, rec['content'], idx))
             
             results = await asyncio.gather(*download_tasks)
-            for idx, path, size in results:
+            for result in results:
+                idx, path, size = result
                 if path:
                     downloaded_images[idx] = path
-                    downloaded_images[f"{idx}_size"] = size
 
         # Generate PDF
         await status_msg.edit_text("📄 PDF બનાવી રહ્યા છીએ...")
