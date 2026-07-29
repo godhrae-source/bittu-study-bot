@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib import colors
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Image as RLImage, PageBreak
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Image as RLImage, PageBreak, Flowable
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from reportlab.lib.utils import ImageReader
@@ -43,6 +43,7 @@ PORT = int(os.environ.get("PORT", 10000))
 
 # Conversation States
 WAITING_FOR_TOPIC = 1
+WAITING_FOR_DATE = 2
 
 DB_FILE = "study_data.db"
 CACHE_EXPIRY = 3600
@@ -51,94 +52,6 @@ MAX_WORKERS = 4
 # Global executor
 executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
 pdf_cache = {}
-
-# ==================== GUJARATI AI SUMMARIZER ====================
-class GujaratiSummarizer:
-    """Simple AI summarizer for Gujarati text"""
-    
-    def __init__(self):
-        self.stopwords = {
-            'અને', 'આ', 'આવી', 'આવું', 'આવો', 'આવા', 'એ', 'એક', 
-            'એમ', 'એવા', 'એવું', 'એવી', 'કે', 'કરી', 'કરે', 'કર્યું',
-            'છે', 'છેઅ', 'છેતો', 'જ', 'જે', 'તે', 'તેમ', 'તેને',
-            'તેની', 'તેનું', 'તેના', 'તો', 'થઈ', 'થયું', 'થાય',
-            'થી', 'દ્વારા', 'ને', 'પણ', 'પર', 'પ્રમાણે', 'માટે',
-            'મા', 'માં', 'રહી', 'રહે', 'વગેરે', 'વાળું', 'સાથે',
-            'સુધી', 'હતા', 'હતી', 'હતું', 'હતો', 'હવે', 'હોય'
-        }
-    
-    def extract_keywords(self, text):
-        text = re.sub(r'[^\u0A80-\u0AFF\s]', '', text)
-        words = text.split()
-        word_freq = {}
-        for word in words:
-            if word not in self.stopwords and len(word) > 1:
-                word_freq[word] = word_freq.get(word, 0) + 1
-        sorted_words = sorted(word_freq.items(), key=lambda x: x[1], reverse=True)
-        return [word for word, freq in sorted_words[:5]]
-    
-    def generate_summary(self, text, max_words=150):
-        if not text or len(text.split()) <= 30:
-            return text if text else "કોઈ ટેક્સ્ટ નથી."
-        sentences = re.split(r'[.!?।]', text)
-        sentences = [s.strip() for s in sentences if len(s.strip()) > 10]
-        if len(sentences) <= 2:
-            return text[:200] + '...'
-        keywords = self.extract_keywords(text)
-        sentence_scores = {}
-        for i, sentence in enumerate(sentences):
-            score = 0
-            for keyword in keywords:
-                if keyword in sentence:
-                    score += 2
-            if i == 0:
-                score += 3
-            if i == len(sentences) - 1:
-                score += 2
-            sentence_scores[sentence] = score
-        sorted_sentences = sorted(sentence_scores.items(), key=lambda x: x[1], reverse=True)
-        summary = []
-        word_count = 0
-        for sentence, score in sorted_sentences[:3]:
-            words = sentence.split()
-            if word_count + len(words) <= max_words:
-                summary.append(sentence)
-                word_count += len(words)
-            else:
-                break
-        if not summary:
-            summary = [sentences[0][:100]]
-        return ' '.join(summary) + '...'
-    
-    def summarize_for_pdf(self, records, title):
-        if not records:
-            return "કોઈ સામગ્રી મળી નથી. (No content found)"
-        all_text = []
-        for rec in records:
-            if rec['type'] == 'text':
-                all_text.append(rec['content'])
-        if not all_text:
-            return "ફક્ત ફોટાઓ છે, ટેક્સ્ટ સારાંશ ઉપલબ્ધ નથી.\n(Only photos, text summary not available)"
-        combined_text = ' '.join(all_text)
-        summary = self.generate_summary(combined_text, 150)
-        header = "📝 સારાંશ (Summary)\n"
-        footer = f"\n---\n📊 કુલ {len(records)} એન્ટ્રીઓ | {len(all_text)} ટેક્સ્ટ એન્ટ્રીઓ"
-        return header + summary + footer
-    
-    def get_topic_summary(self, records, topic):
-        if not records:
-            return f"'{topic}' વિષય પર કોઈ સામગ્રી નથી."
-        all_text = []
-        for rec in records:
-            if rec['type'] == 'text':
-                all_text.append(rec['content'])
-        if not all_text:
-            return f"'{topic}' વિષય પર ફક્ત ફોટાઓ છે."
-        combined_text = ' '.join(all_text)
-        summary = self.generate_summary(combined_text, 120)
-        return f"📌 {topic} વિષયનો સારાંશ:\n\n{summary}"
-
-summarizer = GujaratiSummarizer()
 
 # ==================== DATABASE ====================
 def init_db():
@@ -177,19 +90,14 @@ def get_all_topics():
     conn.close()
     return topics
 
-def get_gujarati_day(date_str):
-    """Convert date to Gujarati day"""
-    days = {
-        'Monday': 'સોમવાર', 'Tuesday': 'મંગળવાર', 'Wednesday': 'બુધવાર',
-        'Thursday': 'ગુરુવાર', 'Friday': 'શુક્રવાર', 'Saturday': 'શનિવાર',
-        'Sunday': 'રવિવાર'
-    }
-    try:
-        dt = datetime.strptime(date_str, "%Y-%m-%d")
-        day_name = dt.strftime("%A")
-        return days.get(day_name, day_name)
-    except:
-        return ""
+def get_available_dates():
+    """Get all dates with entries"""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT DISTINCT DATE(timestamp) FROM content_store ORDER BY DATE(timestamp) DESC")
+    dates = [row[0] for row in cursor.fetchall()]
+    conn.close()
+    return dates
 
 # ==================== FLASK SERVER ====================
 app = Flask(__name__)
@@ -233,253 +141,198 @@ async def run_flask():
 
 # ==================== IMAGE HANDLING ====================
 async def fetch_image_fast(bot, file_id, idx):
-    """Fetch image and return path and size"""
+    """Fetch image with original quality"""
     try:
         tg_file = await bot.get_file(file_id)
         file_bytes = await tg_file.download_as_bytearray()
         img = Image.open(BytesIO(file_bytes)).convert("RGB")
-        if max(img.size) > 1200:
-            img.thumbnail((1200, 1200), Image.Resampling.LANCZOS)
+        
+        # Don't resize - keep original for best quality
         temp_path = f"temp_{idx}_{int(time.time())}.jpg"
-        img.save(temp_path, "JPEG", quality=85, optimize=True)
-        # Return path and size as tuple
+        img.save(temp_path, "JPEG", quality=95, optimize=False)
         return (idx, temp_path, img.size)
     except Exception as e:
         logger.error(f"Error downloading photo {file_id}: {e}")
         return (idx, None, None)
 
-# ==================== SMART PDF GENERATOR WITH INDEX ====================
+# ==================== PDF GENERATOR ====================
 def generate_smart_pdf(records, downloaded_images, title, summary_text, record_ids):
-    """Smart PDF with index in Gujarati, no white space, smart packing"""
+    """Generate PDF with maximum image zoom, minimal margins"""
     pdf_buffer = BytesIO()
     
-    # Page setup
+    # Minimal margins - only 5px
+    margin = 5
     page_width, page_height = A4
-    margin = 25
     usable_width = page_width - (2 * margin)
     usable_height = page_height - (2 * margin)
     
-    doc = SimpleDocTemplate(pdf_buffer, pagesize=A4,
-                           leftMargin=margin, rightMargin=margin,
-                           topMargin=margin, bottomMargin=margin)
+    # Create a canvas directly for precise control
+    c = canvas.Canvas(pdf_buffer, pagesize=A4)
     
-    story = []
-    styles = getSampleStyleSheet()
+    # Track current position
+    y_position = page_height - margin
+    current_page = 1
+    total_records = len(records)
     
-    # Custom styles
-    header_style = ParagraphStyle(
-        'CustomHeader',
-        parent=styles['Heading1'],
-        fontSize=18,
-        textColor=colors.HexColor('#1A237E'),
-        alignment=TA_CENTER,
-        spaceAfter=10
-    )
+    # Draw header on first page
+    c.setFont("Helvetica-Bold", 14)
+    c.setFillColor(colors.HexColor('#1A237E'))
+    c.drawCentredString(page_width/2, y_position - 10, title[:50])
     
-    sub_header_style = ParagraphStyle(
-        'SubHeader',
-        parent=styles['Normal'],
-        fontSize=12,
-        textColor=colors.HexColor('#455A64'),
-        alignment=TA_CENTER,
-        spaceAfter=15
-    )
+    c.setFont("Helvetica", 10)
+    c.setFillColor(colors.HexColor('#455A64'))
+    c.drawCentredString(page_width/2, y_position - 25, f"{datetime.now().strftime('%Y-%m-%d %H:%M')} | Total: {total_records} items")
     
-    index_style = ParagraphStyle(
-        'IndexStyle',
-        parent=styles['Normal'],
-        fontSize=11,
-        textColor=colors.HexColor('#1A237E'),
-        leftIndent=10,
-        spaceAfter=4,
-        backColor=colors.HexColor('#E8EAF6'),
-        borderPadding=5
-    )
+    y_position -= 40
     
-    summary_style = ParagraphStyle(
-        'SummaryStyle',
-        parent=styles['Normal'],
-        fontSize=10,
-        textColor=colors.HexColor('#1A5276'),
-        leftIndent=15,
-        rightIndent=15,
-        spaceAfter=15,
-        backColor=colors.HexColor('#EBF5FB'),
-        borderPadding=10,
-        borderColor=colors.HexColor('#2980B9'),
-        borderWidth=1
-    )
-    
-    topic_style = ParagraphStyle(
-        'TopicStyle',
-        parent=styles['Normal'],
-        fontSize=10,
-        textColor=colors.HexColor('#455A64'),
-        alignment=TA_CENTER,
-        spaceAfter=5
-    )
-    
-    # ==================== PAGE 1: INDEX IN GUJARATI ====================
-    # Header with Date, Day, Total Images
-    today_str = datetime.now().strftime("%Y-%m-%d")
-    guj_day = get_gujarati_day(today_str)
-    
-    story.append(Paragraph(f"📚 {title}", header_style))
-    story.append(Paragraph(f"📅 તારીખ (Date): {today_str} | {guj_day}", sub_header_style))
-    story.append(Paragraph(f"📸 કુલ ફોટાઓ (Total Images): {len(records)}", sub_header_style))
-    story.append(Spacer(1, 10))
-    
-    # Gujarati Summary
+    # Add summary if available
     if summary_text:
-        story.append(Paragraph("📝 *AI સારાંશ (AI Summary)*", styles['Heading3']))
-        story.append(Paragraph(summary_text.replace('\n', '<br/>'), summary_style))
-        story.append(Spacer(1, 10))
+        c.setFont("Helvetica-Bold", 10)
+        c.setFillColor(colors.HexColor('#1A5276'))
+        c.drawString(margin + 5, y_position - 10, "📝 Summary:")
+        c.setFont("Helvetica", 9)
+        c.setFillColor(colors.HexColor('#2C3E50'))
+        
+        # Wrap summary text
+        summary_lines = []
+        words = summary_text.split()
+        line = ""
+        for word in words:
+            if len(line + " " + word) < 80:
+                line += " " + word if line else word
+            else:
+                summary_lines.append(line)
+                line = word
+        if line:
+            summary_lines.append(line)
+        
+        for i, line in enumerate(summary_lines[:3]):
+            c.drawString(margin + 10, y_position - 25 - (i * 12), line[:80])
+        
+        y_position -= 30 + (len(summary_lines[:3]) * 12)
     
-    # Index Header
-    story.append(Paragraph("📋 *સૂચિ (Index)*", styles['Heading2']))
-    story.append(Spacer(1, 8))
+    # Draw separator
+    c.setStrokeColor(colors.HexColor('#BDC3C7'))
+    c.setLineWidth(0.5)
+    c.line(margin, y_position - 5, page_width - margin, y_position - 5)
+    y_position -= 20
     
-    # Build Index
-    index_entries = []
-    for idx, rec in enumerate(records, 1):
-        topic = rec['topic']
-        timestamp = rec['timestamp'][:16]
-        if rec['type'] == 'photo':
-            title_text = f"Image {idx}"
-        else:
-            content_preview = rec['content'][:50] + "..." if len(rec['content']) > 50 else rec['content']
-            title_text = content_preview
-        index_entries.append(f"{idx}. {topic} - {title_text} ({timestamp})")
-    
-    # Display index in columns for better use of space
-    for entry in index_entries[:20]:
-        story.append(Paragraph(entry, index_style))
-        story.append(Spacer(1, 2))
-    
-    if len(records) > 20:
-        story.append(Paragraph(f"... અને {len(records) - 20} વધુ એન્ટ્રીઓ", styles['Italic']))
-    
-    story.append(Spacer(1, 10))
-    story.append(Paragraph("<hr/>", styles['Normal']))
-    story.append(Spacer(1, 5))
-    story.append(Paragraph(f"<i>કુલ {len(records)} એન્ટ્રીઓ | Generated by Bittu Study Bot</i>", 
-                          styles['Italic']))
-    
-    # Page break after index
-    story.append(PageBreak())
-    
-    # ==================== CONTENT PAGES: SMART PACKING ====================
-    # Group images by type (photo vs text)
-    photo_items = [(idx, rec) for idx, rec in enumerate(records) if rec['type'] == 'photo' and idx in downloaded_images]
-    text_items = [(idx, rec) for idx, rec in enumerate(records) if rec['type'] == 'text']
-    
-    # Process photos first with smart packing
-    current_page_photos = []
-    current_page_texts = []
-    current_page_height = 0
-    max_page_height = usable_height - 80
-    
-    def flush_page():
-        nonlocal story, current_page_photos, current_page_texts, current_page_height
-        if current_page_photos or current_page_texts:
-            # Add page header
-            story.append(Paragraph(f"📷 પૃષ્ઠ", sub_header_style))
-            story.append(Spacer(1, 5))
-            
-            # Add photos with smart layout
-            if current_page_photos:
-                num_photos = len(current_page_photos)
-                if num_photos == 1:
-                    # Single photo - use full page
-                    img_path = current_page_photos[0][0]
-                    if img_path:
-                        story.append(RLImage(img_path, width=usable_width-20, height=usable_height-120))
-                elif num_photos == 2:
-                    # Two photos - side by side or stacked
-                    img1_path = current_page_photos[0][0]
-                    img2_path = current_page_photos[1][0]
-                    
-                    if img1_path and img2_path:
-                        half_width = (usable_width - 10) / 2
-                        half_height = usable_height - 120
-                        
-                        story.append(Spacer(1, 5))
-                        # Side by side
-                        story.append(RLImage(img1_path, width=half_width-10, height=half_height))
-                        story.append(Spacer(1, 5))
-                        story.append(RLImage(img2_path, width=half_width-10, height=half_height))
-                else:
-                    # 3+ photos - grid layout
-                    cols = 2 if num_photos <= 4 else 3
-                    rows = (num_photos + cols - 1) // cols
-                    
-                    cell_width = (usable_width - (cols - 1) * 5) / cols
-                    cell_height = (usable_height - 120 - (rows - 1) * 5) / rows
-                    
-                    # Add images in grid
-                    for i, (img_path) in enumerate(current_page_photos):
-                        if img_path:
-                            width = cell_width * 0.85
-                            height = cell_height * 0.85
-                            story.append(RLImage(img_path, width=width, height=height))
-                            story.append(Spacer(1, 3))
-            
-            # Add text items
-            for idx, rec in current_page_texts:
-                story.append(Paragraph(f"📝 *{rec['topic']}*", styles['Heading4']))
-                text_content = safe_str(rec['content'])[:300]
-                if len(rec['content']) > 300:
-                    text_content += "..."
-                story.append(Paragraph(text_content, styles['Normal']))
-                story.append(Spacer(1, 5))
-            
-            story.append(Spacer(1, 10))
-            story.append(Paragraph("<hr/>", styles['Normal']))
-            story.append(Spacer(1, 5))
-            
-            # Reset
-            current_page_photos = []
-            current_page_texts = []
-            current_page_height = 0
-    
-    # Process all items with smart packing
+    # Process each record
     for idx, rec in enumerate(records):
+        # Check if we need a new page
+        if y_position < 50:
+            c.showPage()
+            current_page += 1
+            y_position = page_height - margin
+            # Add page header
+            c.setFont("Helvetica", 9)
+            c.setFillColor(colors.HexColor('#7F8C8D'))
+            c.drawCentredString(page_width/2, y_position - 5, f"Page {current_page}")
+            y_position -= 15
+        
+        # Draw topic
+        topic_text = f"📌 {rec['topic']} | {rec['timestamp'][:16]}"
+        c.setFont("Helvetica-Bold", 9)
+        c.setFillColor(colors.HexColor('#2C3E50'))
+        
+        # Background for topic
+        c.setFillColor(colors.HexColor('#ECF0F1'))
+        c.rect(margin, y_position - 15, page_width - 2*margin, 18, fill=True, stroke=False)
+        c.setFillColor(colors.HexColor('#2C3E50'))
+        c.drawString(margin + 10, y_position - 10, topic_text[:70])
+        y_position -= 22
+        
         if rec['type'] == 'photo' and idx in downloaded_images:
             img_path = downloaded_images[idx]
-            # Estimate space needed
-            photo_height = 300
+            if img_path and os.path.exists(img_path):
+                try:
+                    img = Image.open(img_path)
+                    orig_w, orig_h = img.size
+                    img.close()
+                    
+                    # MAXIMUM ZOOM - fill available space
+                    avail_w = page_width - (2 * margin)
+                    avail_h = y_position - margin
+                    
+                    # Scale to fit with minimal padding
+                    scale_w = (avail_w - 4) / orig_w
+                    scale_h = (avail_h - 4) / orig_h
+                    scale = min(scale_w, scale_h)
+                    final_w = orig_w * scale
+                    final_h = orig_h * scale
+                    
+                    # Add border around image
+                    border_width = 1.5
+                    c.setStrokeColor(colors.HexColor('#2C3E50'))
+                    c.setLineWidth(border_width)
+                    
+                    # Center image horizontally
+                    x_pos = (page_width - final_w) / 2
+                    
+                    # Draw border rectangle
+                    c.rect(x_pos - border_width, y_position - final_h - border_width, 
+                          final_w + 2*border_width, final_h + 2*border_width)
+                    
+                    # Draw image
+                    c.drawImage(img_path, x_pos, y_position - final_h, 
+                               width=final_w, height=final_h)
+                    
+                    y_position -= (final_h + 10)
+                    
+                except Exception as e:
+                    logger.error(f"Error adding image {idx}: {e}")
+                    c.setFont("Helvetica", 8)
+                    c.setFillColor(colors.HexColor('#E74C3C'))
+                    c.drawString(margin + 10, y_position - 10, "⚠️ Image error")
+                    y_position -= 20
             
-            # Check if adding this photo exceeds page height
-            if current_page_height + photo_height + 60 > max_page_height and current_page_photos:
-                flush_page()
-                current_page_height = 0
-            
-            current_page_photos.append((img_path, rec))
-            current_page_height += photo_height + 30
-            
+            else:
+                c.setFont("Helvetica", 8)
+                c.setFillColor(colors.HexColor('#E74C3C'))
+                c.drawString(margin + 10, y_position - 10, "⚠️ Image not found")
+                y_position -= 20
+                
         elif rec['type'] == 'text':
-            # Check if adding text exceeds page height
-            text_height = min(len(rec['content']) / 20 * 15, 200)
-            if current_page_height + text_height + 40 > max_page_height and current_page_texts:
-                flush_page()
-                current_page_height = 0
+            text_content = safe_str(rec['content'])
+            if len(text_content) > 200:
+                text_content = text_content[:200] + "..."
             
-            current_page_texts.append((idx, rec))
-            current_page_height += text_height + 30
-    
-    # Flush remaining items
-    flush_page()
+            # Wrap text to fit page
+            c.setFont("Helvetica", 9)
+            c.setFillColor(colors.HexColor('#2C3E50'))
+            lines = []
+            words = text_content.split()
+            line = ""
+            for word in words:
+                if len(line + " " + word) < 80:
+                    line += " " + word if line else word
+                else:
+                    lines.append(line)
+                    line = word
+            if line:
+                lines.append(line)
+            
+            for i, line in enumerate(lines[:10]):
+                c.drawString(margin + 10, y_position - 12 - (i * 12), line[:80])
+                y_position -= 12
+            
+            y_position -= 10
+        
+        # Add separator between entries (border)
+        c.setStrokeColor(colors.HexColor('#BDC3C7'))
+        c.setLineWidth(0.5)
+        c.line(margin, y_position - 5, page_width - margin, y_position - 5)
+        y_position -= 12
     
     # Footer on last page
-    story.append(Spacer(1, 20))
-    story.append(Paragraph(f"<i>📊 કુલ {len(records)} એન્ટ્રીઓ | Generated by Bittu Study Bot</i>", 
-                          styles['Italic']))
+    c.setFont("Helvetica", 8)
+    c.setFillColor(colors.HexColor('#7F8C8D'))
+    c.drawCentredString(page_width/2, 20, f"Generated by Bittu Study Bot | {total_records} entries")
     
-    # Build PDF
-    doc.build(story)
+    c.save()
     pdf_buffer.seek(0)
     
-    # Cleanup
+    # Cleanup temp files
     for path in downloaded_images.values():
         if path and os.path.exists(path):
             try:
@@ -489,10 +342,10 @@ def generate_smart_pdf(records, downloaded_images, title, summary_text, record_i
     
     return pdf_buffer
 
-# ==================== PDF GENERATION WITH PROGRESS ====================
+# ==================== PDF GENERATION WITH TIMEOUT FIX ====================
 async def generate_and_send_pdf_with_summary(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                                               query_sql: str, params: tuple, title: str):
-    """Generate and send PDF with Gujarati index and smart packing"""
+    """Generate and send PDF with timeout handling"""
     chat_id = update.effective_chat.id
     
     if update.message:
@@ -518,8 +371,8 @@ async def generate_and_send_pdf_with_summary(update: Update, context: ContextTyp
                 await status_msg.delete()
                 return
 
-        # Query database
-        conn = sqlite3.connect(DB_FILE)
+        # Query database with timeout
+        conn = sqlite3.connect(DB_FILE, timeout=5)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute(query_sql, params)
@@ -532,11 +385,15 @@ async def generate_and_send_pdf_with_summary(update: Update, context: ContextTyp
 
         await status_msg.edit_text(f"📊 {len(records)} આઇટમ્સ પ્રોસેસ કરી રહ્યા છીએ...")
 
-        # Generate Gujarati summary
-        await status_msg.edit_text("🤖 AI સારાંશ બનાવી રહ્યા છીએ...")
-        summary = summarizer.summarize_for_pdf(records, title)
+        # Generate summary
+        summary = ""
+        text_items = [rec for rec in records if rec['type'] == 'text']
+        if text_items:
+            all_text = ' '.join([rec['content'][:100] for rec in text_items[:3]])
+            if all_text:
+                summary = f"{all_text[:150]}..."
 
-        # Download images with size info
+        # Download images with timeout
         photo_records = [(idx, r) for idx, r in enumerate(records) if r['type'] == 'photo']
         downloaded_images = {}
         
@@ -546,25 +403,37 @@ async def generate_and_send_pdf_with_summary(update: Update, context: ContextTyp
             for idx, rec in photo_records:
                 download_tasks.append(fetch_image_fast(context.bot, rec['content'], idx))
             
-            results = await asyncio.gather(*download_tasks)
-            for result in results:
-                idx, path, size = result
-                if path:
-                    downloaded_images[idx] = path
+            # Set timeout for downloads
+            try:
+                results = await asyncio.wait_for(asyncio.gather(*download_tasks), timeout=30)
+                for result in results:
+                    idx, path, size = result
+                    if path:
+                        downloaded_images[idx] = path
+            except asyncio.TimeoutError:
+                await status_msg.edit_text("⚠️ કેટલાક ફોટાઓ ડાઉનલોડ કરવામાં સમય લાગ્યો...")
 
-        # Generate PDF
+        # Generate PDF with timeout
         await status_msg.edit_text("📄 PDF બનાવી રહ્યા છીએ...")
         record_ids = [rec['id'] for rec in records]
         loop = asyncio.get_event_loop()
-        pdf_buffer = await loop.run_in_executor(
-            executor,
-            generate_smart_pdf,
-            records,
-            downloaded_images,
-            title,
-            summary,
-            record_ids
-        )
+        
+        try:
+            pdf_buffer = await asyncio.wait_for(
+                loop.run_in_executor(
+                    executor,
+                    generate_smart_pdf,
+                    records,
+                    downloaded_images,
+                    title,
+                    summary,
+                    record_ids
+                ),
+                timeout=45
+            )
+        except asyncio.TimeoutError:
+            await status_msg.edit_text("⚠️ PDF બનાવવામાં સમય લાગ્યો, ફરી પ્રયાસ કરો...")
+            return
 
         # Cache
         pdf_data = pdf_buffer.getvalue()
@@ -576,7 +445,7 @@ async def generate_and_send_pdf_with_summary(update: Update, context: ContextTyp
             chat_id=chat_id,
             document=BytesIO(pdf_data),
             filename=f"Study_Report_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
-            caption=f"📄 **{title}** Ready! ({len(records)} items)\n📸 Total Images: {len(photo_records)}\n🤖 AI સારાંશ સાથે"
+            caption=f"📄 **{title}** Ready! ({len(records)} items)"
         )
         
         await status_msg.delete()
@@ -585,6 +454,74 @@ async def generate_and_send_pdf_with_summary(update: Update, context: ContextTyp
         logger.error(f"PDF generation error: {e}")
         await status_msg.edit_text(f"❌ એરર: {str(e)[:100]}")
 
+# ==================== DATE BASED PDF RETRIEVAL ====================
+async def date_pdf_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Get PDF for a specific date"""
+    if not context.args:
+        # Show available dates
+        dates = get_available_dates()
+        if dates:
+            keyboard = []
+            for date in dates[:15]:
+                keyboard.append([InlineKeyboardButton(f"📅 {date}", callback_data=f"date_select_{date}")])
+            keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="menu_back")])
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await update.message.reply_text(
+                "📅 *Select a date:*\n\nOr use `/date_pdf YYYY-MM-DD`",
+                parse_mode="Markdown",
+                reply_markup=reply_markup
+            )
+        else:
+            await update.message.reply_text("⚠️ No dates found. Add some data first!")
+        return
+    
+    date_str = context.args[0].strip()
+    
+    # Validate date format
+    try:
+        datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        await update.message.reply_text("⚠️ Invalid date format. Use: `/date_pdf 2026-07-29`")
+        return
+    
+    date_query = date_str + "%"
+    sql = "SELECT id, type, content, topic, timestamp FROM content_store WHERE timestamp LIKE ? ORDER BY timestamp ASC"
+    await generate_and_send_pdf_with_summary(update, context, sql, (date_query,), f"Study Notes - {date_str}")
+
+async def date_range_pdf_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Get PDF for a date range"""
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "📅 *Date Range PDF*\n\n"
+            "Usage: `/daterange YYYY-MM-DD YYYY-MM-DD`\n"
+            "Example: `/daterange 2026-07-01 2026-07-29`"
+        )
+        return
+    
+    start_date = context.args[0].strip()
+    end_date = context.args[1].strip()
+    
+    # Validate dates
+    try:
+        datetime.strptime(start_date, "%Y-%m-%d")
+        datetime.strptime(end_date, "%Y-%m-%d")
+    except ValueError:
+        await update.message.reply_text("⚠️ Invalid date format. Use: `/daterange 2026-07-01 2026-07-29`")
+        return
+    
+    if start_date > end_date:
+        await update.message.reply_text("⚠️ Start date must be before end date!")
+        return
+    
+    start_query = start_date + " 00:00:00"
+    end_query = end_date + " 23:59:59"
+    sql = "SELECT id, type, content, topic, timestamp FROM content_store WHERE timestamp BETWEEN ? AND ? ORDER BY timestamp ASC"
+    await generate_and_send_pdf_with_summary(
+        update, context, sql, (start_query, end_query), 
+        f"Study Notes - {start_date} to {end_date}"
+    )
+
 # ==================== BOT HANDLERS ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
@@ -592,14 +529,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
          InlineKeyboardButton("📊 Weekly PDF", callback_data="menu_weekly")],
         [InlineKeyboardButton("📈 Monthly PDF", callback_data="menu_monthly"),
          InlineKeyboardButton("🏷️ Topic PDF", callback_data="menu_topic")],
+        [InlineKeyboardButton("📅 By Date", callback_data="menu_date"),
+         InlineKeyboardButton("📅 Date Range", callback_data="menu_daterange")],
         [InlineKeyboardButton("📁 My Data", callback_data="menu_my_data"),
          InlineKeyboardButton("📋 All Topics", callback_data="menu_all_topics")],
         [InlineKeyboardButton("⚡ Instant Report", callback_data="menu_instant"),
          InlineKeyboardButton("🔍 Search", callback_data="menu_search")],
         [InlineKeyboardButton("📊 Stats", callback_data="menu_stats"),
          InlineKeyboardButton("🗑️ Clear Cache", callback_data="menu_clear_cache")],
-        [InlineKeyboardButton("🤖 AI Summary", callback_data="menu_ai_summary"),
-         InlineKeyboardButton("❓ Help", callback_data="menu_help")]
+        [InlineKeyboardButton("❓ Help", callback_data="menu_help")]
     ]
     
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -610,11 +548,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Send screenshots or text, then reply with `#topic`.\n\n"
         "📊 **Generate PDFs:**\n"
         "Use buttons below or commands:\n"
-        "/daily_pdf, /weekly_pdf, /monthly_pdf, /topic_pdf\n\n"
-        "🤖 **AI Feature:**\n"
-        "PDFમાં Gujarati AI સારાંશ + Index ઉમેરાય છે.\n"
-        "📋 Index page with all image titles\n"
-        "🖼️ Smart page packing for better space\n\n"
+        "/daily_pdf, /weekly_pdf, /monthly_pdf, /topic_pdf\n"
+        "/date_pdf [YYYY-MM-DD]\n"
+        "/daterange [start] [end]\n\n"
+        "✨ **PDF Features:**\n"
+        "• 🔍 Maximum image zoom\n"
+        "• 📐 Minimal borders (5px)\n"
+        "• 📄 Multiple images per page\n"
+        "• 🚫 No wasted space\n\n"
         "👇 *Use menu:*"
     )
     
@@ -633,8 +574,7 @@ async def receive_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get('asked_topic'):
         context.user_data['asked_topic'] = True
         await update.message.reply_text(
-            "📌 **Content received!**\nReply with **#topic** (e.g., `#chemistry`):\n\n"
-            "📸 **સામગ્રી મળી!**\n**#topic** સાથે જવાબ આપો.",
+            "📌 **Content received!**\nReply with **#topic** (e.g., `#chemistry`):",
             parse_mode="Markdown"
         )
     return WAITING_FOR_TOPIC
@@ -652,8 +592,7 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get('asked_topic'):
         context.user_data['asked_topic'] = True
         await update.message.reply_text(
-            "📝 **Text received!**\nReply with **#topic** (e.g., `#chemistry`):\n\n"
-            "📝 **લખાણ મળ્યું!**\n**#topic** સાથે જવાબ આપો.",
+            "📝 **Text received!**\nReply with **#topic** (e.g., `#chemistry`):",
             parse_mode="Markdown"
         )
     return WAITING_FOR_TOPIC
@@ -750,8 +689,7 @@ async def topic_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup = InlineKeyboardMarkup(keyboard)
             
             await update.message.reply_text(
-                "🏷️ *Select a topic:*\n\nOr use `/topic_pdf topic_name`\n\n"
-                "🏷️ *વિષય પસંદ કરો:*",
+                "🏷️ *Select a topic:*\n\nOr use `/topic_pdf topic_name`",
                 parse_mode="Markdown",
                 reply_markup=reply_markup
             )
@@ -890,50 +828,6 @@ async def search_notes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(msg, parse_mode="Markdown")
 
-async def ai_summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Generate AI summary for today's content in Gujarati"""
-    today = datetime.now().strftime("%Y-%m-%d") + "%"
-    
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM content_store WHERE timestamp LIKE ? ORDER BY timestamp ASC", (today,))
-    records = cursor.fetchall()
-    conn.close()
-    
-    if not records:
-        await update.message.reply_text(
-            "📝 *AI Summary*\n\n"
-            "આજે કોઈ સામગ્રી નથી.\n"
-            "No content found for today."
-        )
-        return
-    
-    summary = summarizer.summarize_for_pdf(records, "Today's Summary")
-    
-    topic_summaries = []
-    topics = {}
-    for rec in records:
-        topic = rec['topic']
-        if topic not in topics:
-            topics[topic] = []
-        topics[topic].append(rec)
-    
-    for topic, recs in topics.items():
-        topic_summary = summarizer.get_topic_summary(recs, topic)
-        topic_summaries.append(topic_summary)
-    
-    msg = "🤖 *AI Summary (Gujarati)*\n\n"
-    msg += f"📅 તારીખ: {datetime.now().strftime('%Y-%m-%d')}\n"
-    msg += f"📊 કુલ એન્ટ્રીઓ: {len(records)}\n\n"
-    msg += "---\n\n"
-    msg += summary
-    msg += "\n\n---\n\n"
-    msg += "📌 *વિષયવાર સારાંશ:*\n\n"
-    msg += "\n\n".join(topic_summaries)
-    
-    await update.message.reply_text(msg[:4000], parse_mode="Markdown")
-
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = """
 📚 *Bittu Study Bot Help*
@@ -942,22 +836,20 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • Send photo → Reply with #topic
 • Send text → Reply with #topic
 
-*📊 Generate PDFs (with AI Gujarati Summary + Index):*
+*📊 Generate PDFs:*
 • /daily_pdf - Today's notes
 • /weekly_pdf - Last 7 days
 • /monthly_pdf - Last 30 days
 • /topic_pdf [topic] - Topic wise
+• /date_pdf [YYYY-MM-DD] - Specific date
+• /daterange [start] [end] - Date range
 
 ✨ *PDF Features:*
-• 📋 Index page in Gujarati with all image titles
-• 📅 Header with Date, Day, Total Images
-• 🖼️ Smart page packing (multiple small images on 1 page)
-• 📐 Auto-fit for vertical & horizontal images
-• 🤖 AI Gujarati summary on first page
-• 🚫 No white space waste
-
-*🤖 AI Features:*
-• /aisummary - Today's AI summary in Gujarati
+• 🔍 Maximum image zoom
+• 📐 Minimal borders (5px only)
+• 📄 Multiple images per page
+• 🚫 No wasted space
+• 📅 Date and time header
 
 *🔍 Search & Stats:*
 • /search [query] - Search notes
@@ -991,6 +883,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                     f"Topic PDF - {topic}")
         return
     
+    if data.startswith("date_select_"):
+        date_str = data.replace("date_select_", "")
+        date_query = date_str + "%"
+        sql = "SELECT id, type, content, topic, timestamp FROM content_store WHERE timestamp LIKE ? ORDER BY timestamp ASC"
+        await generate_and_send_pdf_with_summary(update, context, sql, (date_query,), f"Study Notes - {date_str}")
+        return
+    
     if data == "menu_daily":
         await daily_pdf(update, context)
     elif data == "menu_weekly":
@@ -1006,13 +905,33 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="menu_back")])
             reply_markup = InlineKeyboardMarkup(keyboard)
             await query.message.edit_text(
-                "🏷️ *Select a topic:*\n\n"
-                "🏷️ *વિષય પસંદ કરો:*",
+                "🏷️ *Select a topic:*",
                 parse_mode="Markdown",
                 reply_markup=reply_markup
             )
         else:
             await query.message.edit_text("⚠️ No topics found. Add some data first!")
+    elif data == "menu_date":
+        dates = get_available_dates()
+        if dates:
+            keyboard = []
+            for date in dates[:15]:
+                keyboard.append([InlineKeyboardButton(f"📅 {date}", callback_data=f"date_select_{date}")])
+            keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="menu_back")])
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.message.edit_text(
+                "📅 *Select a date:*",
+                parse_mode="Markdown",
+                reply_markup=reply_markup
+            )
+        else:
+            await query.message.edit_text("⚠️ No dates found. Add some data first!")
+    elif data == "menu_daterange":
+        await query.message.edit_text(
+            "📅 *Date Range PDF*\n\n"
+            "Usage: `/daterange YYYY-MM-DD YYYY-MM-DD`\n"
+            "Example: `/daterange 2026-07-01 2026-07-29`"
+        )
     elif data == "menu_my_data":
         await my_data(update, context)
     elif data == "menu_all_topics":
@@ -1030,8 +949,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "menu_clear_cache":
         pdf_cache.clear()
         await query.message.edit_text("🗑️ Cache cleared successfully!")
-    elif data == "menu_ai_summary":
-        await ai_summary_command(update, context)
     elif data == "menu_help":
         await help_command(update, context)
     elif data == "menu_back":
@@ -1066,13 +983,14 @@ async def main():
     application.add_handler(CommandHandler("weekly_pdf", weekly_pdf))
     application.add_handler(CommandHandler("monthly_pdf", monthly_pdf))
     application.add_handler(CommandHandler("topic_pdf", topic_pdf))
+    application.add_handler(CommandHandler("date_pdf", date_pdf_command))
+    application.add_handler(CommandHandler("daterange", date_range_pdf_command))
     application.add_handler(CommandHandler("clearcache", clear_cache))
     application.add_handler(CommandHandler("alltopics", all_topics))
     application.add_handler(CommandHandler("mydata", my_data))
     application.add_handler(CommandHandler("instant", instant_report))
     application.add_handler(CommandHandler("search", search_notes))
     application.add_handler(CommandHandler("stats", stats_command))
-    application.add_handler(CommandHandler("aisummary", ai_summary_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("cancel", cancel))
     application.add_handler(CallbackQueryHandler(button_handler))
