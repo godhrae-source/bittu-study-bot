@@ -391,7 +391,7 @@ async def generate_and_send_pdf_with_summary(update: Update, context: ContextTyp
             try: await status_msg.edit_text(f"❌ એરર: {str(e)[:100]}")
             except: pass
 
-# ==================== COMMANDS & HANDLERS ====================
+# ==================== KEYBOARDS & START COMMAND (WITH CRASH FIX) ====================
 def get_main_keyboard():
     keyboard = [
         [KeyboardButton("📅 Daily PDF"), KeyboardButton("📊 Weekly PDF")],
@@ -415,13 +415,39 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("❓ Help", callback_data="menu_help")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    msg = "📚 *Bittu Study Notes Bot*\n\n📸 **Save Content:**\nSend screenshots or text, then reply with `#topic`.\n\n📊 **Generate PDFs:**\nUse buttons below or type commands:\n/daily_pdf, /weekly_pdf, /monthly_pdf, /topic_pdf\n/date_pdf, /daterange\n\n✨ **PDF Features:**\n• 🔍 Maximum image zoom\n• 📐 Minimal borders (5px)\n• 📄 Multiple images per page\n• 🚫 No wasted space\n\n👇 *Use menu below or type commands:*"
-    if update.message:
-        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=reply_markup)
-        await update.message.reply_text("💡 *Quick Actions:* Use the buttons below or type commands like /start", parse_mode="Markdown", reply_markup=get_main_keyboard())
-    elif update.callback_query:
-        await update.callback_query.message.edit_text(msg, parse_mode="Markdown", reply_markup=reply_markup)
-        await update.callback_query.message.reply_text("💡 *Quick Actions:* Use the buttons below or type commands like /start", parse_mode="Markdown", reply_markup=get_main_keyboard())
+    
+    msg = (
+        "📚 *Bittu Study Notes Bot*\n\n"
+        "📸 **Save Content:**\n"
+        "Send screenshots or text, then reply with `#topic`.\n\n"
+        "📊 **Generate PDFs:**\n"
+        "Use buttons below or type commands:\n"
+        "/daily_pdf, /weekly_pdf, /monthly_pdf, /topic_pdf\n"
+        "/date_pdf, /daterange\n\n"
+        "✨ **PDF Features:**\n"
+        "• 🔍 Maximum image zoom\n"
+        "• 📐 Minimal borders (5px)\n"
+        "• 📄 Multiple images per page\n"
+        "• 🚫 No wasted space\n\n"
+        "👇 *Use menu below or type commands:*"
+    )
+    
+    # OPTION 2 FALLBACK: Try Markdown, if it fails, send without formatting to prevent crash
+    try:
+        if update.message:
+            await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=reply_markup)
+            await update.message.reply_text("💡 *Quick Actions:* Use the buttons below or type commands like /start", parse_mode="Markdown", reply_markup=get_main_keyboard())
+        elif update.callback_query:
+            await update.callback_query.message.edit_text(msg, parse_mode="Markdown", reply_markup=reply_markup)
+            await update.callback_query.message.reply_text("💡 *Quick Actions:* Use the buttons below or type commands like /start", parse_mode="Markdown", reply_markup=get_main_keyboard())
+    except Exception:
+        # SAFE FALLBACK: Send plain text without Markdown so the bot never dies
+        if update.message:
+            await update.message.reply_text(msg, reply_markup=reply_markup)
+            await update.message.reply_text("Quick Actions: Use the buttons below", reply_markup=get_main_keyboard())
+        elif update.callback_query:
+            await update.callback_query.message.edit_text(msg, reply_markup=reply_markup)
+            await update.callback_query.message.reply_text("Quick Actions: Use the buttons below", reply_markup=get_main_keyboard())
 
 async def handle_type_area_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
@@ -733,4 +759,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        logger.info("Bot stopped.")
+        logger.info("Bot stopped.")2
